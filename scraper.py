@@ -1,5 +1,5 @@
 import re
-from urllib.parse import urlparse, urljoin, urldefrag, parse_qsl, unquote
+from urllib.parse import urlparse, urljoin, urldefrag, parse_qsl, unquote, urlsplit, urlunsplit, quote
 from bs4 import BeautifulSoup
 from collections import Counter
 from crawl_stats import record_page, should_expand_page
@@ -23,7 +23,9 @@ def extract_next_links(url, resp):
         return []
 
     # Resolve relative links against the final page URL.
-    page_url = raw.url or resp.url or url
+    page_url = prepare_url(raw.url or resp.url or url)
+    if page_url is None:
+        return []
     if not is_valid(page_url):
         return []
     soup = BeautifulSoup(raw.content, "html.parser")
@@ -40,9 +42,9 @@ def extract_next_links(url, resp):
     
     links = set()
     for anchor in soup.find_all("a", href=True):
-        absolute_url = urljoin(page_url, anchor["href"].strip())
-        clean_url, _ = urldefrag(absolute_url)
-        links.add(clean_url)
+        clean_url = prepare_url(anchor["href"], page_url)
+        if clean_url is not None:
+            links.add(clean_url)
     return list(links)
 
 def is_valid(url):
@@ -102,3 +104,35 @@ def is_url_trap(parsed):
     if keys and max(Counter(keys).values()) >= 4:
         return True
     return False
+
+def prepare_url(url, base_url=None):
+    if not isinstance(url, str):
+        return None
+
+    # Reject control characters, markup, and backslashes.
+    if any(ord(char) < 32 or ord(char) == 127 or char in "<>\\" for char in url):
+        return None
+
+    try:
+        absolute = (urljoin(base_url, url.strip()) if base_url else url.strip())
+        parsed = urlsplit(absolute)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return None
+        if parsed.username is not None or parsed.password is not None:
+            return None
+        port = parsed.port
+        if port not in (None, 80, 443):
+            return None
+
+        # Convert international hostnames to their ASCII representation.
+        hostname = parsed.hostname.encode("idna").decode("ascii")
+        if not re.fullmatch(r"[a-z0-9.-]+", hostname):
+            return None
+        authority = (hostname if port is None else f"{hostname}:{port}")
+
+        # Encode Unicode and spaces, preserving existing percent escapes.
+        prepared = urlunsplit((parsed.scheme, authority, quote(parsed.path, safe="/:@!$&'()*+,;=%"), quote(parsed.query, safe="/?:@!$&'()*+,;=%"), ""))
+        return prepared if is_valid(prepared) else None
+    
+    except (TypeError, ValueError):
+        return None
