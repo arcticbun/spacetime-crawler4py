@@ -115,7 +115,7 @@ def is_url_trap(parsed):
     if re.search(r"^.*?/(.*?/)\1{2,}", path_lower):
         return True
 
-    # 2. Path segment limits
+    # 2. Path segment limits & segment repetition
     segments = [part for part in unquote(parsed.path).split("/") if part]
     if len(segments) > 15:
         return True
@@ -143,7 +143,7 @@ def is_url_trap(parsed):
         return True
 
     # 8. Dynamic sorting, filtering, themes, & pagination traps
-    if re.search(r"[?&](sort|order|orderby|dir|display|mode|view|skin|theme|lang)=", query_lower):
+    if re.search(r"(^|[?&;])(sort|order|orderby|dir|display|mode|view|skin|theme|lang)=", query_lower):
         return True
 
     # 9. Query string limits and repeated parameter keys
@@ -151,7 +151,7 @@ def is_url_trap(parsed):
         return True
 
     # 10. Block Apache directory index sorting permutations (?C=N;O=D, ?C=M;O=A)
-    if re.search(r"[?&;](c=[ndms]|o=[ad]|c=|o=)", query_lower):
+    if re.search(r"(^|[?&;])(c=[ndms]|o=[ad]|c=|o=)", query_lower):
         return True
 
     try:
