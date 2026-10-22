@@ -76,10 +76,14 @@ def is_valid(url):
         if len(url) > 2048 or is_url_trap(parsed):
             return False
 
-        # Check path without trailing slash
-        path = parsed.path.lower().rstrip('/')
+        path = parsed.path.lower()
 
-        # Block media and static non-HTML files
+        # Block extensionless binary files and kernel images in path
+        if re.search(r"/(zimage|vmlinuz|boot|firmware|binaries)", path):
+            return False
+
+        # Check path without trailing slash for non-HTML file extensions
+        clean_path = path.rstrip('/')
         return not re.search(
             r"\.(css|js|bmp|gif|jpe?g|ico"
             + r"|png|tiff?|mid|mp2|mp3|mp4"
@@ -87,8 +91,8 @@ def is_valid(url):
             + r"|ps|eps|tex|ppt|pptx|doc|docx|xls|xlsx|names"
             + r"|data|dat|exe|bz2|tar|msi|bin|7z|psd|dmg|iso"
             + r"|epub|dll|cnf|tgz|sha1"
-            + r"|thmx|mso|arff|rtf|jar|csv"
-            + r"|rm|smil|wmv|swf|wma|zip|rar|gz)$", path)
+            + r"|thmx|mso|arff|rtf|jar|csv|lif|ipynb"
+            + r"|rm|smil|wmv|swf|wma|zip|rar|gz)$", clean_path)
 
     except (TypeError, ValueError):
         return False
