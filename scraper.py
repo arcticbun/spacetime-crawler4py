@@ -131,7 +131,7 @@ def is_url_trap(parsed):
         return True
 
     # 6. Wiki traps (DokuWiki & MediaWiki actions/revisions/diffs)
-    if re.search(r"(do=(media|diff|revisions|edit|index|recent|backlink|export|admin|login|register)|tab_details=|tab_files=|image=|action=(edit|history|info)|diff=|oldid=)", query_lower):
+    if re.search(r"(do=(media|diff|revisions|edit|index|recent|backlink|export|admin|login|register)|tab_details=|tab_files=|image=|action=(edit|history|info)|diff=|oldid=|rev=|idx=)", query_lower):
         return True
 
     # 7. WordPress comment & format traps
