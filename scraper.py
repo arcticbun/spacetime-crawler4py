@@ -3,6 +3,7 @@ from urllib.parse import urlparse, urljoin, urldefrag, parse_qsl, unquote, urlsp
 from bs4 import BeautifulSoup
 from collections import Counter
 from crawl_stats import record_page, should_expand_page
+import xml.etree.ElementTree as ET
 
 def scraper(url, resp):
     links = extract_next_links(url, resp)
@@ -14,7 +15,24 @@ def extract_next_links(url, resp):
     # Skip unsuccessful responses and empty bodies.
     if resp.status != 200 or raw is None or not raw.content:
         return []
+
+    # Resolve relative links against the final page URL.
+    page_url = prepare_url(raw.url or resp.url or url)
+    if page_url is None or not is_valid(page_url):
+        return []
+
     content_type = raw.headers.get("Content-Type", "").lower()
+
+    # Handle Sitemap XML files
+    if "xml" in content_type or page_url.endswith(".xml") or "sitemap" in page_url.lower():
+        sitemap_urls = extract_sitemap_urls(raw.content)
+        valid_links = set()
+        for loc in sitemap_urls:
+            clean = prepare_url(loc, page_url)
+            if clean:
+                valid_links.add(clean)
+        return list(valid_links)
+
     if content_type and not any(kind in content_type for kind in ("text/html", "application/xhtml+xml")):
         return []
 
@@ -22,12 +40,6 @@ def extract_next_links(url, resp):
     if len(raw.content) > 5 * 1024 * 1024:
         return []
 
-    # Resolve relative links against the final page URL.
-    page_url = prepare_url(raw.url or resp.url or url)
-    if page_url is None:
-        return []
-    if not is_valid(page_url):
-        return []
     soup = BeautifulSoup(raw.content, "html.parser")
     words = extract_words(soup)
 
@@ -48,9 +60,6 @@ def extract_next_links(url, resp):
     return list(links)
 
 def is_valid(url):
-    # Decide whether to crawl this url or not. 
-    # If you decide to crawl it, return True; otherwise return False.
-    # There are already some conditions that return False.
     try:
         parsed = urlparse(url)
         if parsed.scheme not in set(["http", "https"]):
@@ -143,3 +152,19 @@ def prepare_url(url, base_url=None):
     
     except (TypeError, ValueError):
         return None
+
+def extract_sitemap_urls(sitemap_xml_content):
+    """
+    Parses sitemap XML content and extracts all contained URLs from <loc> tags.
+    Works with both urlset and sitemapindex schemas.
+    """
+    urls = []
+    try:
+        root = ET.fromstring(sitemap_xml_content)
+        # Strip XML namespace if present (e.g., {http://www.sitemaps.org/schemas/sitemap/0.9})
+        for elem in root.iter():
+            if elem.tag.endswith('loc') and elem.text:
+                urls.append(elem.text.strip())
+    except (ET.ParseError, Exception):
+        pass
+    return urls
