@@ -1,6 +1,7 @@
 import re
-from urllib.parse import urlparse, urljoin, urldefrag
+from urllib.parse import urlparse, urljoin, urldefrag, parse_qsl, unquote
 from bs4 import BeautifulSoup
+from collections import Counter
 from crawl_stats import record_page
 
 def scraper(url, resp):
@@ -44,6 +45,8 @@ def is_valid(url):
         hostname = (parsed.hostname or "").lower()
         if not any(hostname == domain or hostname.endswith("." + domain) for domain in allowed_domains):
             return False
+        if len(url) > 2048 or is_url_trap(parsed):
+            return False
         return not re.match(
             r".*\.(css|js|bmp|gif|jpe?g|ico"
             + r"|png|tiff?|mid|mp2|mp3|mp4"
@@ -54,9 +57,9 @@ def is_valid(url):
             + r"|thmx|mso|arff|rtf|jar|csv"
             + r"|rm|smil|wmv|swf|wma|zip|rar|gz)$", parsed.path.lower())
 
-    except TypeError:
-        print ("TypeError for ", parsed)
-        raise
+    except (TypeError, ValueError):
+        # Skip malformed URLs rather than stopping the worker.
+        return False
 
 def extract_words(soup):
     # Exclude code and content that isn't normally displayed.
@@ -66,3 +69,23 @@ def extract_words(soup):
 
     # Treat alphabetic sequences, including contractions, as words.
     return re.findall(r"\b[a-z]+(?:'[a-z]+)?\b", text)
+
+def is_url_trap(parsed):
+    # Decode paths so encoded slashes cannot hide repetition.
+    segments = [part for part in unquote(parsed.path).split("/") if part]
+
+    # Initial limits; review rejected URLs during test crawls.
+    if len(segments) > 20:
+        return True
+    if segments and max(Counter(segments).values()) >= 4:
+        return True
+
+    # Raises ValueError if there are too many query fields.
+    parameters = parse_qsl(parsed.query, keep_blank_values=True, max_num_fields=20)
+    keys = [key.lower() for key, value in parameters]
+    session_keys = {"sid", "sessionid", "phpsessid", "jsessionid"}
+    if any(key in session_keys for key in keys):
+        return True
+    if keys and max(Counter(keys).values()) >= 4:
+        return True
+    return False
