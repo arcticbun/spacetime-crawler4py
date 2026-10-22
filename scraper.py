@@ -138,8 +138,8 @@ def is_url_trap(parsed):
     if "replytocom=" in query_lower or "format=xml" in query_lower or "format=json" in query_lower:
         return True
 
-    # 8. Dynamic sorting, filtering, & pagination traps
-    if re.search(r"[?&](sort|order|orderby|dir|display|mode|view)=", query_lower):
+    # 8. Dynamic sorting, filtering, themes, & pagination traps
+    if re.search(r"[?&](sort|order|orderby|dir|display|mode|view|skin|theme|lang)=", query_lower):
         return True
 
     # 9. Query string limits and repeated parameter keys
