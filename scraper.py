@@ -62,6 +62,13 @@ def is_valid(url):
             return False
         if len(url) > 2048 or is_url_trap(parsed):
             return False
+        
+        # Target specific infinite date navigation parameters and date-path patterns
+        if re.search(r"(\?.*?(date|ical|outlook-ical|filter|share)=|/\d{4}-\d{2}/|/\d{4}/\d{2}/)", parsed.path.lower() + "?" + parsed.query.lower()):
+            return False
+        if len(parsed.query) > 200:
+            return False
+        
         return not re.match(
             r".*\.(css|js|bmp|gif|jpe?g|ico"
             + r"|png|tiff?|mid|mp2|mp3|mp4"
