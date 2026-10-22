@@ -146,6 +146,10 @@ def is_url_trap(parsed):
     if len(query_lower) > 150:
         return True
 
+    # 10. Block Apache directory index sorting permutations (?C=N;O=D, ?C=M;O=A)
+    if re.search(r"[?&;](c=[ndms]|o=[ad]|c=|o=)", query_lower):
+        return True
+
     try:
         parameters = parse_qsl(parsed.query, keep_blank_values=True, max_num_fields=15)
         keys = [key.lower() for key, value in parameters]
