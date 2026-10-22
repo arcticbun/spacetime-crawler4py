@@ -24,7 +24,8 @@ def extract_next_links(url, resp):
     content_type = raw.headers.get("Content-Type", "").lower()
 
     # Handle Sitemap XML files
-    if "xml" in content_type or page_url.endswith(".xml") or "sitemap" in page_url.lower():
+    is_xml = "xml" in content_type or page_url.split('?')[0].endswith(".xml") or raw.content.strip().startswith(b"<?xml")
+    if is_xml and (b"<urlset" in raw.content or b"<sitemapindex" in raw.content):
         sitemap_urls = extract_sitemap_urls(raw.content)
         valid_links = set()
         for loc in sitemap_urls:
@@ -62,34 +63,34 @@ def extract_next_links(url, resp):
 def is_valid(url):
     try:
         parsed = urlparse(url)
-        if parsed.scheme not in set(["http", "https"]):
+        if parsed.scheme not in {"http", "https"}:
             return False
-        # Accept only the assigned domains and their subdomains.
+
+        # Accept only assigned domains and subdomains
         allowed_domains = ("ics.uci.edu", "cs.uci.edu", "informatics.uci.edu", "stat.uci.edu")
         hostname = (parsed.hostname or "").lower()
         if not any(hostname == domain or hostname.endswith("." + domain) for domain in allowed_domains):
             return False
+
+        # Overall URL length limit and trap check
         if len(url) > 2048 or is_url_trap(parsed):
             return False
-        
-        # Target specific infinite date navigation parameters and date-path patterns
-        if re.search(r"(\?.*?(date|ical|outlook-ical|filter|share)=|/\d{4}-\d{2}/|/\d{4}/\d{2}/)", parsed.path.lower() + "?" + parsed.query.lower()):
-            return False
-        if len(parsed.query) > 200:
-            return False
-        
-        return not re.match(
-            r".*\.(css|js|bmp|gif|jpe?g|ico"
+
+        # Check path without trailing slash
+        path = parsed.path.lower().rstrip('/')
+
+        # Block media and static non-HTML files
+        return not re.search(
+            r"\.(css|js|bmp|gif|jpe?g|ico"
             + r"|png|tiff?|mid|mp2|mp3|mp4"
             + r"|wav|avi|mov|mpeg|ram|m4v|mkv|ogg|ogv|pdf"
             + r"|ps|eps|tex|ppt|pptx|doc|docx|xls|xlsx|names"
             + r"|data|dat|exe|bz2|tar|msi|bin|7z|psd|dmg|iso"
             + r"|epub|dll|cnf|tgz|sha1"
             + r"|thmx|mso|arff|rtf|jar|csv"
-            + r"|rm|smil|wmv|swf|wma|zip|rar|gz)$", parsed.path.lower())
+            + r"|rm|smil|wmv|swf|wma|zip|rar|gz)$", path)
 
     except (TypeError, ValueError):
-        # Skip malformed URLs rather than stopping the worker.
         return False
 
 def extract_words(soup):
@@ -102,23 +103,60 @@ def extract_words(soup):
     return re.findall(r"\b[a-z]+(?:'[a-z]+)?\b", text)
 
 def is_url_trap(parsed):
-    # Decode paths so encoded slashes cannot hide repetition.
+    path_lower = parsed.path.lower()
+    query_lower = parsed.query.lower()
+    full_url_lower = path_lower + "?" + query_lower
+
+    # 1. Cyclic repeating path sequences (e.g., /dirA/dirB/dirA/dirB/)
+    if re.search(r"^.*?/(.*?/)\1{2,}", path_lower):
+        return True
+
+    # 2. Path segment limits
     segments = [part for part in unquote(parsed.path).split("/") if part]
-
-    # Initial limits; review rejected URLs during test crawls.
-    if len(segments) > 20:
+    if len(segments) > 15:
         return True
-    if segments and max(Counter(segments).values()) >= 4:
+    if segments and max(Counter(segments).values()) >= 3:
         return True
 
-    # Raises ValueError if there are too many query fields.
-    parameters = parse_qsl(parsed.query, keep_blank_values=True, max_num_fields=20)
-    keys = [key.lower() for key, value in parameters]
-    session_keys = {"sid", "sessionid", "phpsessid", "jsessionid"}
-    if any(key in session_keys for key in keys):
+    # 3. Source control & repository browser traps
+    if re.search(r"/(commit|commits|tree|blob|blame|raw|history|branches|tags)/", path_lower):
         return True
-    if keys and max(Counter(keys).values()) >= 4:
+
+    # 4. Mailing list archive traps
+    if re.search(r"/(pipermail|mailman/listinfo|mailman/options|mailman/admin)/", path_lower):
         return True
+
+    # 5. Calendar and date infinite navigation
+    if re.search(r"(\?.*?(date|ical|outlook-ical|calendar|day|month|year)=|/\d{4}-\d{2}/|/\d{4}/\d{2}/)", full_url_lower):
+        return True
+
+    # 6. Wiki traps (DokuWiki & MediaWiki actions/revisions/diffs)
+    if re.search(r"(do=(media|diff|revisions|edit|index|recent|backlink|export|admin|login|register)|tab_details=|tab_files=|image=|action=(edit|history|info)|diff=|oldid=)", query_lower):
+        return True
+
+    # 7. WordPress comment & format traps
+    if "replytocom=" in query_lower or "format=xml" in query_lower or "format=json" in query_lower:
+        return True
+
+    # 8. Dynamic sorting, filtering, & pagination traps
+    if re.search(r"[?&](sort|order|orderby|dir|display|mode|view)=", query_lower):
+        return True
+
+    # 9. Query string limits and repeated parameter keys
+    if len(query_lower) > 150:
+        return True
+
+    try:
+        parameters = parse_qsl(parsed.query, keep_blank_values=True, max_num_fields=15)
+        keys = [key.lower() for key, value in parameters]
+        session_keys = {"sid", "sessionid", "phpsessid", "jsessionid"}
+        if any(key in session_keys for key in keys):
+            return True
+        if keys and max(Counter(keys).values()) >= 3:
+            return True
+    except ValueError:
+        return True
+
     return False
 
 def prepare_url(url, base_url=None):
@@ -144,9 +182,13 @@ def prepare_url(url, base_url=None):
         hostname = parsed.hostname.encode("idna").decode("ascii")
         if not re.fullmatch(r"[a-z0-9.-]+", hostname):
             return None
-        authority = (hostname if port is None else f"{hostname}:{port}")
+            
+        if port is None or (parsed.scheme == "http" and port == 80) or (parsed.scheme == "https" and port == 443):
+            authority = hostname
+        else:
+            authority = f"{hostname}:{port}"
 
-        # Encode Unicode and spaces, preserving existing percent escapes.
+        # Encode Unicode and spaces, preserving existing percent escapes and removing fragments.
         prepared = urlunsplit((parsed.scheme, authority, quote(parsed.path, safe="/:@!$&'()*+,;=%"), quote(parsed.query, safe="/?:@!$&'()*+,;=%"), ""))
         return prepared if is_valid(prepared) else None
     
@@ -154,14 +196,9 @@ def prepare_url(url, base_url=None):
         return None
 
 def extract_sitemap_urls(sitemap_xml_content):
-    """
-    Parses sitemap XML content and extracts all contained URLs from <loc> tags.
-    Works with both urlset and sitemapindex schemas.
-    """
     urls = []
     try:
         root = ET.fromstring(sitemap_xml_content)
-        # Strip XML namespace if present (e.g., {http://www.sitemaps.org/schemas/sitemap/0.9})
         for elem in root.iter():
             if elem.tag.endswith('loc') and elem.text:
                 urls.append(elem.text.strip())
