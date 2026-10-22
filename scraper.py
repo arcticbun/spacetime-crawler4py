@@ -35,6 +35,9 @@ def extract_next_links(url, resp):
 
     # Count distinct URLs before deciding whether to follow their links.
     record_page(page_url, words)
+    if not should_expand_page(page_url, words):
+        return []
+    
     links = set()
     for anchor in soup.find_all("a", href=True):
         absolute_url = urljoin(page_url, anchor["href"].strip())
