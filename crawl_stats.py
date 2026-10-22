@@ -3,6 +3,7 @@ import sqlite3
 from collections import Counter
 from contextlib import closing
 from urllib.parse import urldefrag, urlparse
+from hashlib import sha256
 
 
 def record_page(url, words, db_path="crawl_stats.sqlite3"):
@@ -29,3 +30,38 @@ def record_page(url, words, db_path="crawl_stats.sqlite3"):
                     (url, hostname, word_count, word_counts)
                 VALUES (?, ?, ?, ?)
             """, (url, hostname, len(words), counts))
+
+def should_expand_page(url, words, db_path="crawl_stats.sqlite3"):
+    url, _ = urldefrag(url)
+    fingerprint = sha256(" ".join(words).encode("utf-8")).hexdigest()
+    with closing(sqlite3.connect(db_path)) as db:
+        with db:
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS content_checks (
+                    fingerprint TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    expand INTEGER NOT NULL,
+                    PRIMARY KEY (fingerprint, url)
+                )
+            """)
+
+            # Reprocessing the same URL preserves its earlier decision.
+            existing = db.execute("""
+                SELECT expand FROM content_checks
+                WHERE fingerprint = ? AND url = ?
+            """, (fingerprint, url)).fetchone()
+            if existing is not None:
+                return bool(existing[0])
+            copies = db.execute("""
+                SELECT COUNT(*) FROM content_checks
+                WHERE fingerprint = ? AND expand = 1
+            """, (fingerprint,)).fetchone()[0]
+
+            # Allow three distinct URLs with identical word sequences.
+            expand = copies < 3
+            db.execute("""
+                INSERT INTO content_checks
+                    (fingerprint, url, expand)
+                VALUES (?, ?, ?)
+            """, (fingerprint, url, int(expand)))
+            return expand

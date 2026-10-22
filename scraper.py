@@ -2,7 +2,7 @@ import re
 from urllib.parse import urlparse, urljoin, urldefrag, parse_qsl, unquote
 from bs4 import BeautifulSoup
 from collections import Counter
-from crawl_stats import record_page
+from crawl_stats import record_page, should_expand_page
 
 def scraper(url, resp):
     links = extract_next_links(url, resp)
@@ -18,12 +18,22 @@ def extract_next_links(url, resp):
     if content_type and not any(kind in content_type for kind in ("text/html", "application/xhtml+xml")):
         return []
 
+    # Initial limit: 5 MiB of HTML.
+    if len(raw.content) > 5 * 1024 * 1024:
+        return []
+
     # Resolve relative links against the final page URL.
     page_url = raw.url or resp.url or url
     if not is_valid(page_url):
         return []
     soup = BeautifulSoup(raw.content, "html.parser")
     words = extract_words(soup)
+
+    # Reject responses containing no extracted text.
+    if not words:
+        return []
+
+    # Count distinct URLs before deciding whether to follow their links.
     record_page(page_url, words)
     links = set()
     for anchor in soup.find_all("a", href=True):
