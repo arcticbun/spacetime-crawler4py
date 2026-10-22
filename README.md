@@ -128,6 +128,60 @@ You can restart the crawler from the seed url
 You can specify a different config file to use by using the command with the option
 ```python3 launch.py --config_file path/to/config```
 
+MONITORING & DATABASE AUDITS
+-------------------------
+
+You can safely run SQL queries against `crawl_stats.sqlite3` in your terminal while the crawler is running in the background.
+
+### 1. General Progress & Speed
+
+* **Total Unique Pages Crawled:**
+  ```bash
+  sqlite3 crawl_stats.sqlite3 "SELECT COUNT(*) FROM pages;"
+  ```
+
+* **Most Recently Crawled Pages:**
+  ```bash
+  sqlite3 crawl_stats.sqlite3 "SELECT url FROM pages ORDER BY rowid DESC LIMIT 10;"
+  ```
+
+### 2. CS121 Project Deliverables & Metrics
+
+* **Subdomain Breakdown (Page Count per Subdomain):**
+  ```bash
+  sqlite3 crawl_stats.sqlite3 "SELECT hostname, COUNT(*) AS pages FROM pages GROUP BY hostname ORDER BY pages DESC;"
+  ```
+
+* **Top 5 Longest Pages by Word Count:**
+  ```bash
+  sqlite3 crawl_stats.sqlite3 "SELECT url, word_count FROM pages ORDER BY word_count DESC LIMIT 5;"
+  ```
+
+### 3. Trap & Quality Audits
+
+* **Check Query Parameters (Verify Parameter Filters):**
+  ```bash
+  sqlite3 crawl_stats.sqlite3 "SELECT url FROM pages WHERE url LIKE '%?%' LIMIT 10;"
+  ```
+
+* **Longest URLs (Detect Path Traps):**
+  ```bash
+  sqlite3 crawl_stats.sqlite3 "SELECT url FROM pages ORDER BY LENGTH(url) DESC LIMIT 10;"
+  ```
+
+* **Shortest Pages by Word Count (Check for Empty/Stub Pages):**
+  ```bash
+  sqlite3 crawl_stats.sqlite3 "SELECT url, word_count FROM pages ORDER BY word_count ASC LIMIT 10;"
+  ```
+
+### 4. Live Auto-Refresh Dashboard
+
+To continuously auto-update subdomain statistics every 15 seconds:
+```bash
+watch -n 15 "sqlite3 crawl_stats.sqlite3 'SELECT hostname, COUNT(*) AS pages FROM pages GROUP BY hostname ORDER BY pages DESC LIMIT 15;'"
+```
+*(Press `Ctrl + C` to exit auto-refresh).*
+
 ARCHITECTURE
 -------------------------
 
