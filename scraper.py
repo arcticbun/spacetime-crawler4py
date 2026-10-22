@@ -1,6 +1,7 @@
 import re
 from urllib.parse import urlparse, urljoin, urldefrag
 from bs4 import BeautifulSoup
+from crawl_stats import record_page
 
 def scraper(url, resp):
     links = extract_next_links(url, resp)
@@ -22,6 +23,7 @@ def extract_next_links(url, resp):
         return []
     soup = BeautifulSoup(raw.content, "html.parser")
     words = extract_words(soup)
+    record_page(page_url, words)
     links = set()
     for anchor in soup.find_all("a", href=True):
         absolute_url = urljoin(page_url, anchor["href"].strip())
