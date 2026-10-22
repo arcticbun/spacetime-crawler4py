@@ -18,8 +18,13 @@ class Crawler(object):
             worker.start()
 
     def start(self):
-        self.start_async()
-        self.join()
+        try:
+            if self.config.threads_count != 1:
+                raise ValueError("This crawler currently supports THREADCOUNT = 1 only")
+            worker = self.worker_factory(0, self.config, self.frontier)
+            worker.run()
+        finally:
+            self.frontier.save.close()
 
     def join(self):
         for worker in self.workers:
