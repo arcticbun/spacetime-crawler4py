@@ -1,21 +1,33 @@
 import re
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin, urldefrag
+from bs4 import BeautifulSoup
 
 def scraper(url, resp):
     links = extract_next_links(url, resp)
     return [link for link in links if is_valid(link)]
 
 def extract_next_links(url, resp):
-    # Implementation required.
-    # url: the URL that was used to get the page
-    # resp.url: the actual url of the page
-    # resp.status: the status code returned by the server. 200 is OK, you got the page. Other numbers mean that there was some kind of problem.
-    # resp.error: when status is not 200, you can check the error here, if needed.
-    # resp.raw_response: this is where the page actually is. More specifically, the raw_response has two parts:
-    #         resp.raw_response.url: the url, again
-    #         resp.raw_response.content: the content of the page!
-    # Return a list with the hyperlinks (as strings) scrapped from resp.raw_response.content
-    return list()
+    raw = resp.raw_response
+
+    # Skip unsuccessful responses and empty bodies.
+    if resp.status != 200 or raw is None or not raw.content:
+        return []
+    content_type = raw.headers.get("Content-Type", "").lower()
+    if content_type and not any(kind in content_type for kind in ("text/html", "application/xhtml+xml")):
+        return []
+
+    # Resolve relative links against the final page URL.
+    page_url = raw.url or resp.url or url
+    if not is_valid(page_url):
+        return []
+    soup = BeautifulSoup(raw.content, "html.parser")
+    words = extract_words(soup)
+    links = set()
+    for anchor in soup.find_all("a", href=True):
+        absolute_url = urljoin(page_url, anchor["href"].strip())
+        clean_url, _ = urldefrag(absolute_url)
+        links.add(clean_url)
+    return list(links)
 
 def is_valid(url):
     # Decide whether to crawl this url or not. 
@@ -24,6 +36,11 @@ def is_valid(url):
     try:
         parsed = urlparse(url)
         if parsed.scheme not in set(["http", "https"]):
+            return False
+        # Accept only the assigned domains and their subdomains.
+        allowed_domains = ("ics.uci.edu", "cs.uci.edu", "informatics.uci.edu", "stat.uci.edu")
+        hostname = (parsed.hostname or "").lower()
+        if not any(hostname == domain or hostname.endswith("." + domain) for domain in allowed_domains):
             return False
         return not re.match(
             r".*\.(css|js|bmp|gif|jpe?g|ico"
@@ -38,3 +55,12 @@ def is_valid(url):
     except TypeError:
         print ("TypeError for ", parsed)
         raise
+
+def extract_words(soup):
+    # Exclude code and content that isn't normally displayed.
+    for element in soup(["script", "style", "noscript", "template"]):
+        element.decompose()
+    text = soup.get_text(separator=" ", strip=True).lower()
+
+    # Treat alphabetic sequences, including contractions, as words.
+    return re.findall(r"\b[a-z]+(?:'[a-z]+)?\b", text)
