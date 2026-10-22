@@ -27,14 +27,19 @@ class Worker(Thread):
             self.logger.info(
                 f"Downloaded {tbd_url}, status <{resp.status}>, "
                 f"using cache {self.config.cache_server}.")
-            if resp.status == 0 or resp.status >= 600:
-                if 600 <= resp.status <= 699:
-                    self.logger.info("Skipping robots-disallowed URL: %s", tbd_url)
-                    self.frontier.mark_url_complete(tbd_url)
-                    time.sleep(self.config.time_delay)
-                    continue
-                self.logger.error("Stopping; URL remains pending: %s. Error: %s", tbd_url, resp.error)
-                return
+            # Handle Spacetime caching server status codes (600-606)
+            if 600 <= resp.status <= 699:
+                self.logger.info("Skipping disallowed/cache-error URL: %s (Status %s)", tbd_url, resp.status)
+                self.frontier.mark_url_complete(tbd_url)
+                time.sleep(self.config.time_delay)
+                continue
+
+            # Handle network connection drop (status == 0)
+            if resp.status == 0:
+                self.logger.error("Network connection failed for %s: %s. Waiting before retry...", tbd_url, resp.error)
+                time.sleep(5)  # Wait for VPN or server to recover instead of shutting down
+                continue       # Retry the worker loop instead of returning
+            
             scraped_urls = scraper.scraper(tbd_url, resp)
             for scraped_url in scraped_urls:
                 self.frontier.add_url(scraped_url)
