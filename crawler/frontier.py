@@ -43,9 +43,7 @@ class Frontier(object):
             if not completed and url == prepare_url(url):
                 self.to_be_downloaded.append(url)
                 tbd_count += 1
-        self.logger.info(
-            f"Found {tbd_count} urls to be downloaded from {total_count} "
-            f"total urls discovered.")
+        self.logger.info(f"Found {tbd_count} urls to be downloaded from {total_count} " f"total urls discovered.")
 
     def get_tbd_url(self):
         try:

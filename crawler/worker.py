@@ -28,6 +28,11 @@ class Worker(Thread):
                 f"Downloaded {tbd_url}, status <{resp.status}>, "
                 f"using cache {self.config.cache_server}.")
             if resp.status == 0 or resp.status >= 600:
+                if 600 <= resp.status <= 699:
+                    self.logger.info("Skipping robots-disallowed URL: %s", tbd_url)
+                    self.frontier.mark_url_complete(tbd_url)
+                    time.sleep(self.config.time_delay)
+                    continue
                 self.logger.error("Stopping; URL remains pending: %s. Error: %s", tbd_url, resp.error)
                 return
             scraped_urls = scraper.scraper(tbd_url, resp)
