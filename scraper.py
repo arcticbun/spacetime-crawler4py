@@ -139,8 +139,8 @@ def is_url_trap(parsed):
     if re.search(r"(do=(media|diff|revisions|edit|index|recent|backlink|export|admin|login|register)|tab_details=|tab_files=|image=|action=(edit|history|info)|diff=|oldid=|rev=|idx=)", query_lower):
         return True
 
-    # 7. WordPress comment & format traps
-    if "replytocom=" in query_lower or "format=xml" in query_lower or "format=json" in query_lower:
+    # 7. WordPress comment, attachment, & format traps
+    if re.search(r"(^|[?&;])(replytocom|attachment_id)=", query_lower) or "format=xml" in query_lower or "format=json" in query_lower:
         return True
 
     # 8. Dynamic sorting, filtering, themes, & pagination traps
