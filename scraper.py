@@ -167,8 +167,12 @@ def is_url_trap(parsed):
     if re.search(r"(^|[?&;])(keywords|search|query)=", query_lower):
         return True
 
-    # 14. Block exported PowerPoint slide wrappers
-    if re.search(r"/sld\d+\.htm$", path_lower):
+    # 14. Block static photo gallery wrappers (e.g., ~eppstein/pix/)
+    if re.search(r"/(pix|gallery|photos|albums)/", path_lower):
+        return True
+
+    # 15. Block PowerPoint HTML presentation slide wrappers and frames (sld01.htm, v3_slide001.htm, frame.htm)
+    if re.search(r"/(sld\d+|v\d+_slide\d+|slide\d+|frame)\.htm[l]?$", path_lower):
         return True
 
     try:
