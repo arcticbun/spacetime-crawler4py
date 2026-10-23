@@ -1,5 +1,4 @@
 from threading import Thread
-
 from inspect import getsource
 from utils.download import download
 from utils import get_logger
@@ -27,6 +26,7 @@ class Worker(Thread):
             self.logger.info(
                 f"Downloaded {tbd_url}, status <{resp.status}>, "
                 f"using cache {self.config.cache_server}.")
+            
             # Handle Spacetime caching server status codes (600-606)
             if 600 <= resp.status <= 699:
                 self.logger.info("Skipping disallowed/cache-error URL: %s (Status %s)", tbd_url, resp.status)
@@ -36,9 +36,10 @@ class Worker(Thread):
 
             # Handle network connection drop (status == 0)
             if resp.status == 0:
-                self.logger.error("Network connection failed for %s: %s. Waiting before retry...", tbd_url, resp.error)
-                time.sleep(5)  # Wait for VPN or server to recover instead of shutting down
-                continue       # Retry the worker loop instead of returning
+                self.logger.error("Network connection failed for %s: %s. Re-queueing...", tbd_url, resp.error)
+                self.frontier.add_url(tbd_url)  # Re-queue failed URL so it is not permanently lost
+                time.sleep(5)  # Wait for connection to recover
+                continue       # Retry worker loop
             
             scraped_urls = scraper.scraper(tbd_url, resp)
             for scraped_url in scraped_urls:
