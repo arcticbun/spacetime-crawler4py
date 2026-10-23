@@ -8,13 +8,11 @@ from hashlib import sha256
 
 
 def record_page(url, words, db_path="crawl_stats.sqlite3"):
-    # URL uniqueness ignores fragments but preserves everything else.
     url, _ = urldefrag(url)
     hostname = (urlparse(url).hostname or "").lower()
     counts = json.dumps(dict(Counter(words)))
 
     with closing(sqlite3.connect(db_path)) as db:
-        # Commit the record, or roll back if something fails.
         with db:
             db.execute("""
                 CREATE TABLE IF NOT EXISTS pages (
@@ -25,7 +23,6 @@ def record_page(url, words, db_path="crawl_stats.sqlite3"):
                 )
             """)
 
-            # Keep the first record if this URL was already processed.
             db.execute("""
                 INSERT OR IGNORE INTO pages
                     (url, hostname, word_count, word_counts)
@@ -59,7 +56,6 @@ def should_expand_page(url, words, db_path="crawl_stats.sqlite3"):
                 return bool(existing[0])
 
             # 2. Near-Duplicate Check using SimHash Hamming Distance
-            # Fetch existing expanded page SimHashes
             rows = db.execute("""
                 SELECT simhash FROM content_checks
                 WHERE expand = 1
@@ -67,15 +63,15 @@ def should_expand_page(url, words, db_path="crawl_stats.sqlite3"):
 
             for (prev_simhash_hex,) in rows:
                 prev_simhash = int(prev_simhash_hex, 16)
-                # If Hamming distance <= 3, pages are near-duplicates
-                if hamming_distance(simhash_fp, prev_simhash) <= 3:
+                # Distance threshold increased to <= 4 to catch wiki/login template drift
+                if hamming_distance(simhash_fp, prev_simhash) <= 4:
                     db.execute("""
                         INSERT INTO content_checks (fingerprint, simhash, url, expand)
                         VALUES (?, ?, ?, 0)
                     """, (exact_fingerprint, simhash_hex, url))
                     return False
 
-            # Allow page expansion if not a near-duplicate
+            # Allow page expansion
             db.execute("""
                 INSERT INTO content_checks (fingerprint, simhash, url, expand)
                 VALUES (?, ?, ?, 1)
@@ -83,9 +79,6 @@ def should_expand_page(url, words, db_path="crawl_stats.sqlite3"):
             return True
 
 def compute_simhash_64(words):
-    """
-    Computes a 64-bit SimHash fingerprint from scratch using word frequencies.
-    """
     if not words:
         return 0
 
@@ -93,7 +86,6 @@ def compute_simhash_64(words):
     word_counts = Counter(words)
 
     for word, count in word_counts.items():
-        # Generate a 64-bit hash from word using md5
         word_hash = int(hashlib.md5(word.encode('utf-8')).hexdigest()[:16], 16)
         
         for i in range(64):
@@ -111,9 +103,6 @@ def compute_simhash_64(words):
     return fingerprint
 
 def hamming_distance(f1, f2):
-    """
-    Calculates bitwise Hamming distance between two 64-bit integers.
-    """
     x = f1 ^ f2
     distance = 0
     while x > 0:
