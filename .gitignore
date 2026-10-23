@@ -109,3 +109,6 @@ venv.bak/
 *.full.py
 *.shelve
 crawl_stats.sqlite3*
+
+# macOS system files
+.DS_Store
