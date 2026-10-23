@@ -142,8 +142,8 @@ def is_url_trap(parsed):
     if re.search(r"(\?.*?(date|ical|outlook-ical|calendar|day|month|year)=|/\d{4}-\d{2}/|/\d{4}/\d{2}/)", full_url_lower):
         return True
 
-    # 6. Wiki traps
-    if re.search(r"(do=(media|diff|revisions|edit|index|recent|backlink|export|admin|login|register)|tab_details=|tab_files=|image=|action=(edit|history|info)|diff=|oldid=|rev=|idx=)", query_lower):
+    # 6. Wiki traps (DokuWiki, Trac, & MediaWiki actions/revisions/diffs/versions)
+    if re.search(r"(do=(media|diff|revisions|edit|index|recent|backlink|export|admin|login|register)|tab_details=|tab_files=|image=|action=(edit|history|info|diff)|diff=|oldid=|rev=|version=|idx=)", query_lower):
         return True
 
     # 7. WordPress traps
