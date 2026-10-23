@@ -85,13 +85,14 @@ def is_valid(url):
         # Check path without trailing slash for non-HTML file extensions
         clean_path = path.rstrip('/')
         return not re.search(
+            # Add 'ff' and 'bib' to the blacklisted file extensions
             r"\.(css|js|bmp|gif|jpe?g|ico"
             + r"|png|tiff?|mid|mp2|mp3|mp4"
             + r"|wav|avi|mov|mpeg|ram|m4v|mkv|ogg|ogv|pdf"
             + r"|ps|eps|tex|ppt|pptx|doc|docx|xls|xlsx|names"
             + r"|data|dat|exe|bz2|tar|msi|bin|7z|psd|dmg|iso"
             + r"|epub|dll|cnf|tgz|sha1"
-            + r"|thmx|mso|arff|rtf|jar|csv|lif|ipynb"
+            + r"|thmx|mso|arff|rtf|jar|csv|lif|ipynb|ff|bib"
             + r"|rm|smil|wmv|swf|wma|zip|rar|gz)$", clean_path)
 
     except (TypeError, ValueError):
@@ -146,12 +147,28 @@ def is_url_trap(parsed):
     if re.search(r"(^|[?&;])(sort|order|orderby|dir|display|mode|view|skin|theme|lang)=", query_lower):
         return True
 
-    # 9. Query string limits and repeated parameter keys
+    # 9. Query string limits
     if len(query_lower) > 150:
         return True
 
-    # 10. Block Apache directory index sorting permutations (?C=N;O=D, ?C=M;O=A)
+    # 10. Apache directory index sorting permutations (?C=N;O=D, ?C=M;O=A)
     if re.search(r"(^|[?&;])(c=[ndms]|o=[ad]|c=|o=)", query_lower):
+        return True
+
+    # 11. Authentication, login, and registration pages
+    if re.search(r"/(wp-login\.php|login|logout|signin|signup|auth|cas/login)", path_lower):
+        return True
+
+    # 12. Redirection parameters (e.g., redirect_to=...)
+    if re.search(r"(^|[?&;])(redirect_to|redirect|return_to|return|next|destination)=", query_lower):
+        return True
+
+    # 13. Block archive/dataset search and keyword query parameters
+    if re.search(r"(^|[?&;])(keywords|search|query)=", query_lower):
+        return True
+
+    # 14. Block exported PowerPoint slide wrappers
+    if re.search(r"/sld\d+\.htm$", path_lower):
         return True
 
     try:
