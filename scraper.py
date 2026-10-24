@@ -1,9 +1,39 @@
 import re
+import xml.etree.ElementTree as ET
 from urllib.parse import urlparse, urljoin, urldefrag, parse_qsl, unquote, urlsplit, urlunsplit, quote
+from urllib.robotparser import RobotFileParser
 from bs4 import BeautifulSoup
 from collections import Counter
 from crawl_stats import record_page, should_expand_page
-import xml.etree.ElementTree as ET
+
+ROBOTS_PARSERS = {}
+CRAWLER_USER_AGENT = "*"
+
+def set_user_agent(ua):
+    """Sets the global user agent for robots.txt checking."""
+    global CRAWLER_USER_AGENT
+    if ua:
+        CRAWLER_USER_AGENT = ua
+
+def register_robots(hostname, content):
+    """Parses and caches robots.txt content for a domain."""
+    rfp = RobotFileParser()
+    rfp.parse(content.splitlines())
+    ROBOTS_PARSERS[hostname.lower()] = rfp
+
+def is_allowed_by_robots(url, user_agent=None):
+    """Checks if a URL is allowed by the domain's robots.txt rules using configured user agent."""
+    if user_agent is None:
+        user_agent = CRAWLER_USER_AGENT
+    try:
+        parsed = urlparse(url)
+        hostname = (parsed.hostname or "").lower()
+        rfp = ROBOTS_PARSERS.get(hostname)
+        if rfp:
+            return rfp.can_fetch(user_agent, url)
+    except Exception:
+        pass
+    return True
 
 def scraper(url, resp):
     links = extract_next_links(url, resp)
@@ -86,6 +116,9 @@ def is_valid(url):
             return False
 
         if len(url) > 2048 or is_url_trap(parsed):
+            return False
+
+        if not is_allowed_by_robots(url):
             return False
 
         path = parsed.path.lower()

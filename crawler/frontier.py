@@ -70,3 +70,17 @@ class Frontier(object):
 
         self.save[urlhash] = (url, True)
         self.save.sync()
+
+    def requeue_url(self, url):
+        """Re-enqueues an uncompleted URL that failed due to a network drop."""
+        url = prepare_url(url)
+        if url is None:
+            return
+        urlhash = get_urlhash(url)
+        # Re-queue only if it exists in save file and has not been completed
+        if urlhash in self.save:
+            saved_url, completed = self.save[urlhash]
+            if not completed:
+                self.to_be_downloaded.append(saved_url)
+        else:
+            self.add_url(url)

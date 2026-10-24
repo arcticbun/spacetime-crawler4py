@@ -1,27 +1,98 @@
 from threading import Thread
 from inspect import getsource
+from urllib.parse import urlparse
 from utils.download import download
 from utils import get_logger
 import scraper
 import time
+import re
 
+PROCESSED_HOSTS = set()
 
 class Worker(Thread):
     def __init__(self, worker_id, config, frontier):
         self.logger = get_logger(f"Worker-{worker_id}", "Worker")
         self.config = config
         self.frontier = frontier
+        
+        # Configure global user agent in scraper for robots.txt checking consistency
+        ua = getattr(self.config, "user_agent", "*")
+        scraper.set_user_agent(ua)
+
         # basic check for requests in scraper
         assert {getsource(scraper).find(req) for req in {"from requests import", "import requests"}} == {-1}, "Do not use requests in scraper.py"
         assert {getsource(scraper).find(req) for req in {"from urllib.request import", "import urllib.request"}} == {-1}, "Do not use urllib.request in scraper.py"
         super().__init__(daemon=True)
+
+    def process_domain_discovery(self, hostname):
+        """Fetches robots.txt, parses rules, and discovers sitemaps for new domains."""
+        if not hostname or hostname in PROCESSED_HOSTS:
+            return
+
+        robots_urls = [f"https://{hostname}/robots.txt", f"http://{hostname}/robots.txt"]
+        robots_content = None
+        network_failed = False
         
+        for r_url in robots_urls:
+            resp = download(r_url, self.config, self.logger)
+            time.sleep(self.config.time_delay)  # 1. Enforce politeness delay after robots download
+
+            # Handle network connection failure (status == 0)
+            if resp.status == 0:
+                self.logger.warning("Network connection failed while fetching robots.txt for %s. Will retry.", hostname)
+                network_failed = True
+                break
+
+            if resp.status == 200 and resp.raw_response and resp.raw_response.content:
+                try:
+                    robots_content = resp.raw_response.content.decode("utf-8", errors="ignore")
+                    break
+                except Exception:
+                    pass
+
+        # 3. Do not mark hostname processed if network failed, allowing retry on next request
+        if network_failed:
+            return
+
+        PROCESSED_HOSTS.add(hostname)
+
+        sitemap_candidates = set()
+        if robots_content:
+            scraper.register_robots(hostname, robots_content)
+            # Extract Sitemap: directives from robots.txt
+            found_sitemaps = re.findall(r"(?i)^\s*Sitemap:\s*(https?://\S+)", robots_content, re.MULTILINE)
+            for sm in found_sitemaps:
+                sitemap_candidates.add(sm.strip())
+
+        # Add standard default sitemap endpoints
+        sitemap_candidates.add(f"https://{hostname}/sitemap.xml")
+        sitemap_candidates.add(f"https://{hostname}/sitemap_index.xml")
+
+        # Add valid discovered sitemap URLs to frontier
+        for sm_url in sitemap_candidates:
+            clean_sm = scraper.prepare_url(sm_url)
+            if clean_sm and scraper.is_valid(clean_sm):
+                self.frontier.add_url(clean_sm)
+
     def run(self):
         while True:
             tbd_url = self.frontier.get_tbd_url()
             if not tbd_url:
                 self.logger.info("Frontier is empty. Stopping Crawler.")
                 break
+
+            # Perform domain discovery (robots.txt & sitemap) on new hostnames
+            hostname = (urlparse(tbd_url).hostname or "").lower()
+            if hostname and hostname not in PROCESSED_HOSTS:
+                self.process_domain_discovery(hostname)
+
+            # Check robots.txt permissions before fetching (2. Consistent User Agent)
+            if not scraper.is_allowed_by_robots(tbd_url):
+                self.logger.info("Skipping robots.txt disallowed URL: %s", tbd_url)
+                self.frontier.mark_url_complete(tbd_url)
+                time.sleep(self.config.time_delay)
+                continue
+
             resp = download(tbd_url, self.config, self.logger)
             self.logger.info(
                 f"Downloaded {tbd_url}, status <{resp.status}>, "
@@ -37,9 +108,9 @@ class Worker(Thread):
             # Handle network connection drop (status == 0)
             if resp.status == 0:
                 self.logger.error("Network connection failed for %s: %s. Re-queueing...", tbd_url, resp.error)
-                self.frontier.add_url(tbd_url)  # Re-queue failed URL so it is not permanently lost
-                time.sleep(5)  # Wait for connection to recover
-                continue       # Retry worker loop
+                self.frontier.requeue_url(tbd_url)
+                time.sleep(5)
+                continue
             
             scraped_urls = scraper.scraper(tbd_url, resp)
             for scraped_url in scraped_urls:
