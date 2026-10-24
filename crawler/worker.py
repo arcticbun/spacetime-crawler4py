@@ -25,36 +25,54 @@ class Worker(Thread):
         super().__init__(daemon=True)
 
     def process_domain_discovery(self, hostname):
-        """Fetches robots.txt once per domain and queues ONLY explicitly declared sitemaps."""
         if not hostname or hostname in PROCESSED_HOSTS:
-            return
+            return "ready"
 
-        # Single request via standard HTTPS
         robots_url = f"https://{hostname}/robots.txt"
-        resp = download(robots_url, self.config, self.logger)
-        time.sleep(self.config.time_delay)  # Politeness delay
+        visited = set()
 
-        # Network connection failure (status == 0) -> retry on next pass
-        if resp.status == 0:
-            self.logger.warning("Network connection failed while fetching robots.txt for %s. Will retry.", hostname)
-            return
+        # Follow at most five redirects, always through the cache.
+        for _ in range(6):
+            if robots_url in visited:
+                self.logger.error("robots.txt redirect loop for %s", hostname)
+                return "stop"
+            visited.add(robots_url)
 
-        # Mark hostname processed so we only check robots.txt once
-        PROCESSED_HOSTS.add(hostname)
+            resp = download(robots_url, self.config, self.logger)
+            time.sleep(self.config.time_delay)
 
-        if resp.status == 200 and resp.raw_response and resp.raw_response.content:
-            try:
-                robots_content = resp.raw_response.content.decode("utf-8", errors="ignore")
-                scraper.register_robots(hostname, robots_content)
+            if resp.status == 0 or 500 <= resp.status <= 599:
+                return "retry"
 
-                # ONLY queue sitemaps explicitly declared via "Sitemap:" directives in robots.txt
-                found_sitemaps = re.findall(r"(?i)^\s*Sitemap:\s*(https?://\S+)", robots_content, re.MULTILINE)
-                for sm_url in found_sitemaps:
-                    clean_sm = scraper.prepare_url(sm_url.strip())
-                    if clean_sm and scraper.is_valid(clean_sm):
-                        self.frontier.add_url(clean_sm)
-            except Exception:
-                pass
+            if resp.status in (301, 302, 303, 307, 308):
+                raw = resp.raw_response
+                location = raw.headers.get("Location") if raw is not None else None
+                target = scraper.prepare_url(location, robots_url) if location else None
+                if target is None:
+                    self.logger.error(
+                        "Missing or filtered robots redirect: %s", robots_url
+                    )
+                    return "stop"
+                robots_url = target
+                continue
+
+            raw = resp.raw_response
+            if resp.status == 200 and raw is not None and raw.content:
+                content = raw.content.decode("utf-8", errors="ignore")
+                scraper.register_robots(hostname, content)
+
+                for sitemap in re.findall(
+                    r"^\s*Sitemap:\s*(https?://\S+)", content, re.I | re.M
+                ):
+                    clean = scraper.prepare_url(sitemap)
+                    if clean:
+                        self.frontier.add_url(clean)
+
+            PROCESSED_HOSTS.add(hostname)
+            return "ready"
+
+        self.logger.error("robots.txt exceeded five redirects for %s", hostname)
+        return "stop"
 
     def run(self):
         while True:
@@ -65,8 +83,13 @@ class Worker(Thread):
 
             # Perform domain discovery (robots.txt & sitemap) on new hostnames
             hostname = (urlparse(tbd_url).hostname or "").lower()
-            if hostname and hostname not in PROCESSED_HOSTS:
-                self.process_domain_discovery(hostname)
+            discovery = self.process_domain_discovery(hostname)
+            if discovery != "ready":
+                self.frontier.requeue_url(tbd_url)
+                if discovery == "stop":
+                    break
+                time.sleep(5)
+                continue
 
             # Check robots.txt permissions before fetching (2. Consistent User Agent)
             if not scraper.is_allowed_by_robots(tbd_url):
