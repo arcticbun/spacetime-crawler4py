@@ -150,8 +150,10 @@ def is_url_trap(parsed):
     if re.search(r"(^|[?&;])(replytocom|attachment_id)=", query_lower) or "format=xml" in query_lower or "format=json" in query_lower:
         return True
 
-    # 8. Dynamic sorting/filtering traps
-    if re.search(r"(^|[?&;])(sort|order|orderby|dir|display|mode|view|skin|theme|lang)=", query_lower):
+    # scraper.py -> inside is_url_trap()
+
+    # 8. Dynamic sorting, filtering, themes, pagination, & limits traps
+    if re.search(r"(^|[?&;])(sort|order|orderby|dir|display|mode|view|skin|theme|lang|limit|offset)=", query_lower):
         return True
 
     # 9. Query string limits
