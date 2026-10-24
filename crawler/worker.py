@@ -25,54 +25,36 @@ class Worker(Thread):
         super().__init__(daemon=True)
 
     def process_domain_discovery(self, hostname):
-        """Fetches robots.txt, parses rules, and discovers sitemaps for new domains."""
+        """Fetches robots.txt once per domain and queues ONLY explicitly declared sitemaps."""
         if not hostname or hostname in PROCESSED_HOSTS:
             return
 
-        robots_urls = [f"https://{hostname}/robots.txt", f"http://{hostname}/robots.txt"]
-        robots_content = None
-        network_failed = False
-        
-        for r_url in robots_urls:
-            resp = download(r_url, self.config, self.logger)
-            time.sleep(self.config.time_delay)  # 1. Enforce politeness delay after robots download
+        # Single request via standard HTTPS
+        robots_url = f"https://{hostname}/robots.txt"
+        resp = download(robots_url, self.config, self.logger)
+        time.sleep(self.config.time_delay)  # Politeness delay
 
-            # Handle network connection failure (status == 0)
-            if resp.status == 0:
-                self.logger.warning("Network connection failed while fetching robots.txt for %s. Will retry.", hostname)
-                network_failed = True
-                break
-
-            if resp.status == 200 and resp.raw_response and resp.raw_response.content:
-                try:
-                    robots_content = resp.raw_response.content.decode("utf-8", errors="ignore")
-                    break
-                except Exception:
-                    pass
-
-        # 3. Do not mark hostname processed if network failed, allowing retry on next request
-        if network_failed:
+        # Network connection failure (status == 0) -> retry on next pass
+        if resp.status == 0:
+            self.logger.warning("Network connection failed while fetching robots.txt for %s. Will retry.", hostname)
             return
 
+        # Mark hostname processed so we only check robots.txt once
         PROCESSED_HOSTS.add(hostname)
 
-        sitemap_candidates = set()
-        if robots_content:
-            scraper.register_robots(hostname, robots_content)
-            # Extract Sitemap: directives from robots.txt
-            found_sitemaps = re.findall(r"(?i)^\s*Sitemap:\s*(https?://\S+)", robots_content, re.MULTILINE)
-            for sm in found_sitemaps:
-                sitemap_candidates.add(sm.strip())
+        if resp.status == 200 and resp.raw_response and resp.raw_response.content:
+            try:
+                robots_content = resp.raw_response.content.decode("utf-8", errors="ignore")
+                scraper.register_robots(hostname, robots_content)
 
-        # Add standard default sitemap endpoints
-        sitemap_candidates.add(f"https://{hostname}/sitemap.xml")
-        sitemap_candidates.add(f"https://{hostname}/sitemap_index.xml")
-
-        # Add valid discovered sitemap URLs to frontier
-        for sm_url in sitemap_candidates:
-            clean_sm = scraper.prepare_url(sm_url)
-            if clean_sm and scraper.is_valid(clean_sm):
-                self.frontier.add_url(clean_sm)
+                # ONLY queue sitemaps explicitly declared via "Sitemap:" directives in robots.txt
+                found_sitemaps = re.findall(r"(?i)^\s*Sitemap:\s*(https?://\S+)", robots_content, re.MULTILINE)
+                for sm_url in found_sitemaps:
+                    clean_sm = scraper.prepare_url(sm_url.strip())
+                    if clean_sm and scraper.is_valid(clean_sm):
+                        self.frontier.add_url(clean_sm)
+            except Exception:
+                pass
 
     def run(self):
         while True:
