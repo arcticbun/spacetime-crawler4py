@@ -152,8 +152,8 @@ def is_url_trap(parsed):
 
     # scraper.py -> inside is_url_trap()
 
-    # 8. Dynamic sorting, filtering, themes, pagination, & limits traps
-    if re.search(r"(^|[?&;])(sort|order|orderby|dir|display|mode|view|skin|theme|lang|limit|offset)=", query_lower):
+    # 8. Dynamic sorting, filtering, themes, pagination, limits, & subpage traps
+    if re.search(r"(^|[?&;])(sort|order|orderby|dir|display|mode|view|skin|theme|lang|limit|offset|subpage|sub_page)=", query_lower):
         return True
 
     # 9. Query string limits
