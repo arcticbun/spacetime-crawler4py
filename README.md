@@ -174,6 +174,16 @@ You can safely run SQL queries against `crawl_stats.sqlite3` in your terminal wh
   sqlite3 crawl_stats.sqlite3 "SELECT url, word_count FROM pages ORDER BY word_count ASC LIMIT 10;"
   ```
 
+* **Duplicate Detection Breakdown (unique / exact / near):**
+  ```bash
+  sqlite3 crawl_stats.sqlite3 "SELECT status, COUNT(*) FROM content_checks GROUP BY status;"
+  ```
+
+* **Page Families That Hit the Low-Value Budget (likely traps):**
+  ```bash
+  sqlite3 crawl_stats.sqlite3 "SELECT family, count FROM families WHERE count > 25 ORDER BY count DESC LIMIT 15;"
+  ```
+
 ### 4. Live Auto-Refresh Dashboard
 
 To continuously auto-update subdomain statistics every 15 seconds:
