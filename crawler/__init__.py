@@ -7,17 +7,10 @@ class Crawler(object):
         self.config = config
         self.logger = get_logger("CRAWLER")
         self.frontier = frontier_factory(config, restart)
-        self.workers = list()
         self.worker_factory = worker_factory
 
-    def start_async(self):
-        self.workers = [
-            self.worker_factory(worker_id, self.config, self.frontier)
-            for worker_id in range(self.config.threads_count)]
-        for worker in self.workers:
-            worker.start()
-
     def start(self):
+        """Runs a single worker in the current thread until the frontier is empty."""
         try:
             if self.config.threads_count != 1:
                 raise ValueError("This crawler currently supports THREADCOUNT = 1 only")
@@ -25,7 +18,3 @@ class Crawler(object):
             worker.run()
         finally:
             self.frontier.save.close()
-
-    def join(self):
-        for worker in self.workers:
-            worker.join()
