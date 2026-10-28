@@ -1,11 +1,26 @@
 import re
 import xml.etree.ElementTree as ET
-from urllib.parse import urlparse, urljoin, urldefrag, parse_qsl, unquote, urlsplit, urlunsplit, quote
-from urllib.robotparser import RobotFileParser
-from bs4 import BeautifulSoup
 from collections import Counter
-from crawl_stats import record_page, should_expand_page
+from urllib.parse import urlparse, urljoin, parse_qsl, unquote, urlsplit, urlunsplit, quote
+from urllib.robotparser import RobotFileParser
 
+from bs4 import BeautifulSoup
+
+from crawl_stats import record_page, classify_page, consume_family_budget
+
+# Domains (including all of their subdomains) we are allowed to crawl.
+ALLOWED_DOMAINS = ("ics.uci.edu", "cs.uci.edu", "informatics.uci.edu", "stat.uci.edu")
+
+# Responses larger than this are skipped: they are almost always data dumps,
+# logs or binaries with little textual value.
+MAX_CONTENT_BYTES = 5 * 1024 * 1024
+
+# Pages with fewer visible words than this are low information. They still
+# count as unique pages, but their links are only followed while their page
+# family is within budget (see crawl_stats.consume_family_budget).
+LOW_INFO_WORDS = 50
+
+# Parsed robots.txt rules, keyed by lowercase hostname.
 ROBOTS_PARSERS = {}
 CRAWLER_USER_AGENT = "*"
 
@@ -35,16 +50,33 @@ def is_allowed_by_robots(url, user_agent=None):
         pass
     return True
 
+def get_crawl_delay(hostname):
+    """Returns the robots.txt Crawl-delay (seconds) for a host, or None if unset."""
+    rfp = ROBOTS_PARSERS.get((hostname or "").lower())
+    if rfp is None:
+        return None
+    try:
+        return rfp.crawl_delay(CRAWLER_USER_AGENT)
+    except Exception:
+        return None
+
 def scraper(url, resp):
+    """Entry point called by the worker: returns the valid links found on a page."""
     links = extract_next_links(url, resp)
     return [link for link in links if is_valid(link)]
 
 def extract_next_links(url, resp):
+    """Parses a response, records page statistics, and returns outgoing links.
+
+    Handles redirects, sitemaps and HTML pages. Exact duplicates are not
+    expanded; near-duplicate and low-information pages are expanded only
+    while their page family is within budget.
+    """
     raw = resp.raw_response
     if raw is None:
         return []
 
-    # 1. Handle HTTP 3xx Redirects
+    # 1. Handle HTTP 3xx Redirects: queue the target so its content is indexed
     if resp.status in (301, 302, 303, 307, 308):
         location = raw.headers.get("Location") if raw.headers else None
         if location:
@@ -57,21 +89,22 @@ def extract_next_links(url, resp):
     if resp.status != 200 or not raw.content:
         return []
 
-    # Resolve relative links against final URL
+    # Resolve relative links against the final URL (after any redirects
+    # the cache server followed)
     page_url = prepare_url(raw.url or resp.url or url)
     if page_url is None or not is_valid(page_url):
         return []
 
-    # 2. Check 5 MiB size limit BEFORE XML or HTML parsing
+    # 2. Check size limit BEFORE XML or HTML parsing
     content_length = raw.headers.get("Content-Length")
-    if content_length and content_length.isdigit() and int(content_length) > 5 * 1024 * 1024:
+    if content_length and content_length.isdigit() and int(content_length) > MAX_CONTENT_BYTES:
         return []
-    if len(raw.content) > 5 * 1024 * 1024:
+    if len(raw.content) > MAX_CONTENT_BYTES:
         return []
 
     content_type = raw.headers.get("Content-Type", "").lower()
 
-    # Handle Sitemap XML files
+    # Handle Sitemap XML files: their <loc> entries go straight to the frontier
     is_xml = "xml" in content_type or page_url.split('?')[0].endswith(".xml") or raw.content.strip().startswith(b"<?xml")
     if is_xml and (b"<urlset" in raw.content or b"<sitemapindex" in raw.content):
         sitemap_urls = extract_sitemap_urls(raw.content)
@@ -82,39 +115,63 @@ def extract_next_links(url, resp):
                 valid_links.add(clean)
         return list(valid_links)
 
+    # Only HTML pages carry text we want to index
     if content_type and not any(kind in content_type for kind in ("text/html", "application/xhtml+xml")):
         return []
 
     soup = BeautifulSoup(raw.content, "html.parser")
-    words = extract_words(soup)
 
-    # Reject responses containing no extracted text
-    if not words:
-        return []
-
-    # Preserve useful child links even when a page resembles another page.
+    # Extract links before extract_words strips script/style elements
     links = set()
     for anchor in soup.find_all("a", href=True):
         clean_url = prepare_url(anchor["href"], page_url)
         if clean_url is not None:
             links.add(clean_url)
 
-    # URL counting is independent of whether this page's links are followed.
-    record_page(page_url, words)
-    if not should_expand_page(
-        page_url, words, allow_expansion=page_expansion_override(soup)
-    ):
+    words = extract_words(soup)
+
+    # Dead page: 200 status but no visible text
+    if not words:
         return []
+
+    # Every page with text counts toward the report (uniqueness is by URL)
+    record_page(page_url, words)
+
+    # Access-denied and login pages have no content and no useful links
+    if is_access_wall(soup):
+        return []
+
+    # Same text as a page we already expanded: its links add nothing new
+    status = classify_page(page_url, words)
+    if status == "exact":
+        return []
+
+    # Near-duplicates and low-information pages may still link to real
+    # content (e.g. index pages), so follow them until their family proves
+    # to be a repetitive, low-value set of pages
+    if status == "near" or len(words) < LOW_INFO_WORDS:
+        if not consume_family_budget(page_url):
+            return []
+
     return list(links)
 
+def is_access_wall(soup):
+    """Detects "access denied" and login pages.
 
-def page_expansion_override(soup):
-    """Allow content/hubs, reject access walls; let similarity gate navigation-only pages."""
+    A page is an access wall when its first main heading is a denial message,
+    when a login/denial heading appears together with a password field, or
+    when a password field is the only thing outside the site chrome
+    (header, footer, sidebar, forms).
+    """
     content = soup.find("main") or soup.find("article") or soup.body or soup
     content = content.find("article") or content
+
+    # Elements that hold site-wide navigation rather than page content
     chrome = {"head", "header", "footer", "aside", "form"}
     if content.name not in {"main", "article"} and content.find(["header", "footer", "aside"]):
         chrome.add("nav")
+
+    # Normalized h1/h2 text from the content area, in document order
     headings = [
         " ".join(heading.get_text(" ", strip=True).lower().split()).rstrip(".!:")
         for heading in content.find_all(["h1", "h2"])
@@ -123,34 +180,41 @@ def page_expansion_override(soup):
     denial_headings = {"insufficient access privileges", "access denied",
                        "permission denied", "authentication required"}
     if content.name != "article" and headings and headings[0] in denial_headings:
-        return False
+        return True
+
+    # Password fields outside navigation areas mark a login form
     password_form = any(
         not any(parent.name in {"nav", "header", "footer", "aside"} for parent in field.parents)
         for field in content.find_all("input", type=re.compile(r"^password$", re.I))
     )
-    auth_headings = headings[:1] if content.name == "article" else headings
-    if (set(auth_headings) & (denial_headings | {"login", "log in", "sign in"})
-            and password_form):
+    if not password_form:
         return False
 
-    # Even a one-word link outside site chrome can be a useful navigation hub.
-    for text in content.strings:
-        if re.search(r"[a-z]", text, re.I) and not any(
-            parent.name in chrome for parent in text.parents
-        ):
-            return True
-    return False if password_form else None
+    auth_headings = headings[:1] if content.name == "article" else headings
+    if set(auth_headings) & (denial_headings | {"login", "log in", "sign in"}):
+        return True
 
+    # A password form with no other visible text outside the chrome
+    has_content_text = any(
+        re.search(r"[a-z]", text, re.I) and not any(parent.name in chrome for parent in text.parents)
+        for text in content.strings
+    )
+    return not has_content_text
 
 def is_valid(url):
+    """Decides whether a URL should be crawled.
+
+    Checks the scheme, the allowed domains, trap heuristics, robots.txt
+    rules and file extensions that are unlikely to be HTML.
+    """
     try:
         parsed = urlparse(url)
         if parsed.scheme not in {"http", "https"}:
             return False
 
-        allowed_domains = ("ics.uci.edu", "cs.uci.edu", "informatics.uci.edu", "stat.uci.edu")
+        # Host must be one of the allowed domains or a subdomain of one
         hostname = (parsed.hostname or "").lower()
-        if not any(hostname == domain or hostname.endswith("." + domain) for domain in allowed_domains):
+        if not any(hostname == domain or hostname.endswith("." + domain) for domain in ALLOWED_DOMAINS):
             return False
 
         if len(url) > 2048 or is_url_trap(parsed):
@@ -168,32 +232,39 @@ def is_valid(url):
         ):
             return False
 
+        # Non-HTML file extensions
         clean_path = path.rstrip('/')
         return not re.search(
-            r"\.(css|js|bmp|gif|jpe?g|ico"
+            r"\.(css|js|bmp|gif|jpe?g|ico|svg|webp"
             + r"|png|tiff?|mid|mp2|mp3|mp4"
             + r"|wav|avi|mov|mpeg|ram|m4v|mkv|ogg|ogv|pdf"
-            + r"|ps|eps|tex|ppt|pptx|doc|docx|xls|xlsx|names"
-            + r"|data|dat|exe|bz2|tar|msi|bin|7z|psd|dmg|iso"
+            + r"|ps|eps|tex|ppt|pptx|pps|ppsx|doc|docx|xls|xlsx|names"
+            + r"|odt|odp|ods"
+            + r"|data|dat|exe|bz2|tar|msi|bin|7z|psd|dmg|iso|apk|war"
             + r"|epub|dll|cnf|tgz|sha1"
             + r"|thmx|mso|arff|rtf|jar|csv|lif|ipynb|ff|bib"
+            + r"|mat|pkl|npy|npz|h5|sql|json"
             + r"|rm|smil|wmv|swf|wma|zip|rar|gz)$", clean_path)
 
     except (TypeError, ValueError):
         return False
 
 def extract_words(soup):
+    """Returns the lowercase words of a page's visible text (markup excluded)."""
     for element in soup(["script", "style", "noscript", "template"]):
         element.decompose()
     text = soup.get_text(separator=" ", strip=True).lower()
     return re.findall(r"\b[a-z]+(?:'[a-z]+)?\b", text)
 
 def is_url_trap(parsed):
+    """Detects URL patterns known to produce infinite or low-value page sets."""
+    hostname = (parsed.hostname or "").lower()
     path_lower = parsed.path.lower()
     query_lower = parsed.query.lower()
     try:
         parameters = parse_qsl(parsed.query, keep_blank_values=True, max_num_fields=15)
     except ValueError:
+        # More than 15 query parameters
         return True
     keys = [key.lower() for key, value in parameters]
 
@@ -208,21 +279,28 @@ def is_url_trap(parsed):
     if segments and max(Counter(segments).values()) >= 3:
         return True
 
-    # 3. Source control & repository browser traps
-    if re.search(r"/(commit|commits|tree|blob|blame|raw|history|branches|tags)/", path_lower):
-        return True
+    # 3. Source control repository browsers (only on git hosts, so ordinary
+    #    pages like /about/history/ are not caught)
+    if hostname.startswith(("gitlab.", "github.", "git.")) or "/-/" in path_lower:
+        if re.search(r"/(commit|commits|tree|blob|blame|raw|history|branches|tags|compare|network|graphs)(/|$)", path_lower):
+            return True
 
     # 4. Mailing list archive traps
     if re.search(r"/(pipermail|mailman/listinfo|mailman/options|mailman/admin)/", path_lower):
         return True
 
-    # 5. Calendar listing navigation, including full dates and missing trailing slashes.
-    # Keep individual event slugs and ordinary dated articles crawlable.
+    # 5a. Calendar export downloads (.ics files behind a query parameter)
+    if {"ical", "outlook-ical"}.intersection(keys):
+        return True
+
+    # 5b. Calendar listing navigation, including full dates and missing trailing
+    #     slashes. Individual event slugs and ordinary dated articles stay crawlable.
     calendar_path = unquote(path_lower).lower()
-    calendar_route = re.search(r"/(?:events|calendar)(?:\.php)?(?:/|$)", calendar_path)
+    calendar_route = re.search(r"/(?:events?|calendar)(?:\.php)?(?:/|$)", calendar_path)
     calendar_root = calendar_path.rstrip("/") in {"", "/index.php"} and {"month", "year"}.issubset(keys)
-    calendar_keys = {"calendar", "eventdate", "tribe-bar-date", "tribe_event_display"}
-    date_keys = calendar_keys | {"date", "ical", "outlook-ical", "day", "month", "year"}
+    # eventdisplay=past&paged=N pages back through every past event, forever
+    calendar_keys = {"calendar", "eventdate", "eventdisplay", "tribe-bar-date", "tribe_event_display"}
+    date_keys = calendar_keys | {"date", "day", "week", "month", "year"}
     if (calendar_route or calendar_root or calendar_keys.intersection(keys)) and (
         date_keys.intersection(keys) or re.search(
             r"/\d{4}(?:-\d{1,2}(?:-\d{1,2})?|/\d{1,2}(?:/\d{1,2})?)?"
@@ -232,7 +310,7 @@ def is_url_trap(parsed):
         return True
 
     # 6. Wiki traps (DokuWiki, Trac, & MediaWiki actions/revisions/diffs/versions)
-    if re.search(r"(do=(media|diff|revisions|edit|index|recent|backlink|export|admin|login|register)|tab_details=|tab_files=|image=|action=(edit|history|info|diff)|diff=|oldid=|rev=|version=|idx=)", query_lower):
+    if re.search(r"(^|[?&;])(do=(media|diff|revisions|edit|index|recent|backlink|export|admin|login|register)|tab_details=|tab_files=|image=|action=(edit|history|info|diff)|diff=|oldid=|rev=|version=|idx=)", query_lower):
         return True
 
     # 7. WordPress traps
@@ -247,8 +325,8 @@ def is_url_trap(parsed):
     if len(query_lower) > 150:
         return True
 
-    # 10. Apache directory index sorting
-    if re.search(r"(^|[?&;])(c=[ndms]|o=[ad]|c=|o=)", query_lower):
+    # 10. Apache directory index sorting (?C=N;O=D and friends)
+    if re.search(r"(^|[?&;])[co]=", query_lower):
         return True
 
     # 11. Authentication & login pages (strict boundary check)
@@ -271,6 +349,7 @@ def is_url_trap(parsed):
     if re.search(r"/(sld\d+|v\d+_slide\d+|slide\d+|frame)\.htm[l]?$", path_lower):
         return True
 
+    # 16. Session IDs and repeated query keys
     session_keys = {"sid", "sessionid", "phpsessid", "jsessionid"}
     if any(key in session_keys for key in keys):
         return True
@@ -280,9 +359,16 @@ def is_url_trap(parsed):
     return False
 
 def prepare_url(url, base_url=None):
+    """Turns a raw href into a clean absolute ASCII URL, or None if unusable.
+
+    Resolves relative links against base_url, drops the fragment, rejects
+    credentials and non-standard ports, IDNA-encodes the host, percent-encodes
+    the path and query, and finally applies is_valid.
+    """
     if not isinstance(url, str):
         return None
 
+    # Control characters and characters that cannot appear in a real URL
     if any(ord(char) < 32 or ord(char) == 127 or char in "<>\\" for char in url):
         return None
 
@@ -297,22 +383,28 @@ def prepare_url(url, base_url=None):
         if port not in (None, 80, 443):
             return None
 
+        # Send only ASCII hostnames to the server
         hostname = parsed.hostname.encode("idna").decode("ascii")
         if not re.fullmatch(r"[a-z0-9.-]+", hostname):
             return None
-            
+
+        # Drop the port when it is the scheme's default
         if port is None or (parsed.scheme == "http" and port == 80) or (parsed.scheme == "https" and port == 443):
             authority = hostname
         else:
             authority = f"{hostname}:{port}"
 
-        prepared = urlunsplit((parsed.scheme, authority, quote(parsed.path, safe="/:@!$&'()*+,;=%"), quote(parsed.query, safe="/?:@!$&'()*+,;=%"), ""))
+        # An empty path is the same page as "/"; the fragment is discarded
+        path = quote(parsed.path or "/", safe="/:@!$&'()*+,;=%")
+        query = quote(parsed.query, safe="/?:@!$&'()*+,;=%")
+        prepared = urlunsplit((parsed.scheme, authority, path, query, ""))
         return prepared if is_valid(prepared) else None
-    
+
     except (TypeError, ValueError):
         return None
 
 def extract_sitemap_urls(sitemap_xml_content):
+    """Returns every <loc> entry in a sitemap or sitemap index."""
     urls = []
     try:
         root = ET.fromstring(sitemap_xml_content)

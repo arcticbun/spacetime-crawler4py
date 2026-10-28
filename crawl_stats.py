@@ -1,79 +1,179 @@
 import json
+import re
 import sqlite3
-import hashlib
 from collections import Counter
 from contextlib import closing
-from urllib.parse import urldefrag, urlparse
-from hashlib import sha256
+from hashlib import md5, sha256
+from urllib.parse import urlparse, parse_qsl
+
+from utils import url_key
+
+DB_PATH = "crawl_stats.sqlite3"
+
+# Two pages whose 64-bit SimHashes differ in at most this many bits are
+# considered near-duplicates.
+NEAR_DUPLICATE_DISTANCE = 4
+
+# How many near-duplicate or low-information pages one page family (see
+# page_family) may contribute before we stop following links out of them.
+FAMILY_BUDGET = 25
+
+# Database paths whose tables have already been created during this run.
+_initialized = set()
+
+# In-memory copy of the SimHashes of every unique page, keyed by database
+# path, so near-duplicate checks don't re-read the whole table per page.
+_simhashes = {}
 
 
-def record_page(url, words, db_path="crawl_stats.sqlite3"):
-    url, _ = urldefrag(url)
-    hostname = (urlparse(url).hostname or "").lower()
-    counts = json.dumps(dict(Counter(words)))
-
-    with closing(sqlite3.connect(db_path)) as db:
+def _connect(db_path):
+    """Opens the stats database, creating its tables the first time."""
+    db = sqlite3.connect(db_path)
+    if db_path not in _initialized:
         with db:
+            # One row per unique URL; feeds every answer in the report.
             db.execute("""
                 CREATE TABLE IF NOT EXISTS pages (
-                    url TEXT PRIMARY KEY,
+                    url_key TEXT PRIMARY KEY,
+                    url TEXT NOT NULL,
                     hostname TEXT NOT NULL,
                     word_count INTEGER NOT NULL,
                     word_counts TEXT NOT NULL
                 )
             """)
-
-            db.execute("""
-                INSERT OR IGNORE INTO pages
-                    (url, hostname, word_count, word_counts)
-                VALUES (?, ?, ?, ?)
-            """, (url, hostname, len(words), counts))
-
-def should_expand_page(url, words, db_path="crawl_stats.sqlite3", *, allow_expansion=None):
-    """Use similarity unless the scraper explicitly identifies content or an access wall."""
-    url, _ = urldefrag(url)
-    exact_fingerprint = sha256(" ".join(words).encode("utf-8")).hexdigest()
-    simhash_fp = compute_simhash_64(words)
-    simhash_hex = f"{simhash_fp:016x}"
-
-    with closing(sqlite3.connect(db_path)) as db:
-        with db:
+            # Content fingerprints and the duplicate verdict for each URL.
             db.execute("""
                 CREATE TABLE IF NOT EXISTS content_checks (
+                    url_key TEXT PRIMARY KEY,
+                    url TEXT NOT NULL,
                     fingerprint TEXT NOT NULL,
                     simhash TEXT NOT NULL,
-                    url TEXT NOT NULL,
-                    expand INTEGER NOT NULL,
-                    PRIMARY KEY (fingerprint, url)
+                    status TEXT NOT NULL
                 )
             """)
-
-            expand = allow_expansion
-            if expand is None:
-                existing = db.execute("""
-                    SELECT expand FROM content_checks
-                    WHERE fingerprint = ? AND url = ?
-                """, (exact_fingerprint, url)).fetchone()
-                if existing is not None:
-                    return bool(existing[0])
-
-                rows = db.execute("""
-                    SELECT simhash FROM content_checks WHERE expand = 1
-                """).fetchall()
-                expand = not any(
-                    hamming_distance(simhash_fp, int(previous, 16)) <= 4
-                    for (previous,) in rows
-                )
-
-            # Store the actual expansion decision, including overrides of older decisions.
             db.execute("""
-                INSERT INTO content_checks (fingerprint, simhash, url, expand)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(fingerprint, url) DO UPDATE SET expand = excluded.expand
-            """, (exact_fingerprint, simhash_hex, url, int(expand)))
-            return bool(expand)
+                CREATE INDEX IF NOT EXISTS content_checks_fingerprint
+                ON content_checks (fingerprint)
+            """)
+            # Running count of low-value pages seen in each page family.
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS families (
+                    family TEXT PRIMARY KEY,
+                    count INTEGER NOT NULL
+                )
+            """)
+        _initialized.add(db_path)
+    return db
+
+
+def record_page(url, words, db_path=DB_PATH):
+    """Stores a crawled page's word counts, once per unique URL."""
+    hostname = (urlparse(url).hostname or "").lower()
+    counts = json.dumps(dict(Counter(words)))
+
+    with closing(_connect(db_path)) as db:
+        with db:
+            db.execute("""
+                INSERT OR IGNORE INTO pages
+                    (url_key, url, hostname, word_count, word_counts)
+                VALUES (?, ?, ?, ?, ?)
+            """, (url_key(url), url, hostname, len(words), counts))
+
+
+def classify_page(url, words, db_path=DB_PATH):
+    """Classifies a page's content as "unique", "exact" or "near".
+
+    "exact" means another URL already had exactly the same text (SHA-256 of
+    the token stream). "near" means another unique page's SimHash is within
+    NEAR_DUPLICATE_DISTANCE bits. The verdict is stored, so asking again for
+    the same URL returns the same answer.
+    """
+    key = url_key(url)
+    exact_fingerprint = sha256(" ".join(words).encode("utf-8")).hexdigest()
+    simhash_fp = compute_simhash_64(words)
+
+    with closing(_connect(db_path)) as db:
+        with db:
+            # Same URL reached again (e.g. through a redirect): reuse verdict.
+            existing = db.execute(
+                "SELECT status FROM content_checks WHERE url_key = ?", (key,)
+            ).fetchone()
+            if existing is not None:
+                return existing[0]
+
+            simhashes = _load_simhashes(db, db_path)
+
+            # 1. Exact duplicate: identical text already seen at another URL.
+            if db.execute(
+                "SELECT 1 FROM content_checks WHERE fingerprint = ? LIMIT 1",
+                (exact_fingerprint,),
+            ).fetchone():
+                status = "exact"
+            # 2. Near duplicate: SimHash close to some unique page's SimHash.
+            elif any(hamming_distance(simhash_fp, prev) <= NEAR_DUPLICATE_DISTANCE
+                     for prev in simhashes):
+                status = "near"
+            else:
+                status = "unique"
+                simhashes.append(simhash_fp)
+
+            db.execute("""
+                INSERT INTO content_checks (url_key, url, fingerprint, simhash, status)
+                VALUES (?, ?, ?, ?, ?)
+            """, (key, url, exact_fingerprint, f"{simhash_fp:016x}", status))
+            return status
+
+
+def _load_simhashes(db, db_path):
+    """Loads unique pages' SimHashes from disk once, then serves them from memory."""
+    if db_path not in _simhashes:
+        rows = db.execute(
+            "SELECT simhash FROM content_checks WHERE status = 'unique'"
+        ).fetchall()
+        _simhashes[db_path] = [int(simhash_hex, 16) for (simhash_hex,) in rows]
+    return _simhashes[db_path]
+
+
+def page_family(url):
+    """Groups URLs that are likely generated by the same template.
+
+    The family is the host, the parent directory with digits collapsed to
+    "#", and the sorted names of the query parameters. For example
+    /events/2023/page?id=7 and /events/2024/page?id=9 share a family.
+    """
+    parsed = urlparse(url)
+    parent = re.sub(r"\d+", "#", parsed.path.rsplit("/", 1)[0] + "/")
+    keys = sorted({key.lower() for key, _ in parse_qsl(parsed.query, keep_blank_values=True)})
+    return f"{(parsed.hostname or '').lower()}{parent}?{'&'.join(keys)}"
+
+
+def consume_family_budget(url, db_path=DB_PATH):
+    """Counts one low-value page against its family's budget.
+
+    Returns True while the family is still within FAMILY_BUDGET, i.e. its
+    links are still worth following.
+    """
+    family = page_family(url)
+    with closing(_connect(db_path)) as db:
+        with db:
+            db.execute("""
+                INSERT INTO families (family, count) VALUES (?, 1)
+                ON CONFLICT(family) DO UPDATE SET count = count + 1
+            """, (family,))
+            (count,) = db.execute(
+                "SELECT count FROM families WHERE family = ?", (family,)
+            ).fetchone()
+    return count <= FAMILY_BUDGET
+
 
 def compute_simhash_64(words):
+    """Computes a 64-bit SimHash of a page, weighting each word by its frequency.
+
+    Each word is hashed to 64 bits (the first 16 hex digits of its MD5). For
+    every bit position the word's count is added when the bit is 1 and
+    subtracted when it is 0; the fingerprint keeps a 1 wherever the total
+    ends up positive.
+    """
     if not words:
         return 0
 
@@ -81,8 +181,8 @@ def compute_simhash_64(words):
     word_counts = Counter(words)
 
     for word, count in word_counts.items():
-        word_hash = int(hashlib.md5(word.encode('utf-8')).hexdigest()[:16], 16)
-        
+        word_hash = int(md5(word.encode('utf-8')).hexdigest()[:16], 16)
+
         for i in range(64):
             bit = (word_hash >> i) & 1
             if bit == 1:
@@ -97,10 +197,7 @@ def compute_simhash_64(words):
 
     return fingerprint
 
+
 def hamming_distance(f1, f2):
-    x = f1 ^ f2
-    distance = 0
-    while x > 0:
-        distance += x & 1
-        x >>= 1
-    return distance
+    """Number of bit positions in which two fingerprints differ."""
+    return bin(f1 ^ f2).count("1")
