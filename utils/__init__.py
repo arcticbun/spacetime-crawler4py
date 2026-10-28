@@ -1,7 +1,7 @@
 import os
 import logging
 from hashlib import sha256
-from urllib.parse import urlparse, urldefrag
+from urllib.parse import urldefrag, urlsplit, urlunsplit
 
 def get_logger(name, filename=None):
     logger = logging.getLogger(name)
@@ -22,9 +22,21 @@ def get_logger(name, filename=None):
     return logger
 
 
-def get_urlhash(url):
+def url_key(url):
+    """Returns the identity of a URL used for uniqueness checks.
+
+    The fragment is discarded (per the assignment's definition of a unique
+    page), the host is lowercased, an empty path becomes "/", and the scheme
+    is dropped so http:// and https:// copies of a page count once.
+    """
     clean_url, _ = urldefrag(url)
-    return sha256(clean_url.encode("utf-8")).hexdigest()
+    parsed = urlsplit(clean_url)
+    return urlunsplit(("", parsed.netloc.lower(), parsed.path or "/", parsed.query, ""))
+
+
+def get_urlhash(url):
+    """Hashes a URL's identity so the frontier stores each page only once."""
+    return sha256(url_key(url).encode("utf-8")).hexdigest()
 
 def normalize(url):
     if url.endswith("/"):

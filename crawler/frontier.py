@@ -1,13 +1,15 @@
 import os
 import shelve
 
-from threading import Thread, RLock
-from queue import Queue, Empty
-
-from utils import get_logger, get_urlhash, normalize
-from scraper import is_valid, prepare_url
+from utils import get_logger, get_urlhash
+from scraper import prepare_url
 
 class Frontier(object):
+    """Single-threaded frontier backed by a shelve file so a crawl can resume.
+
+    Each URL is stored under its hash as (url, completed). URLs are popped
+    from the end of to_be_downloaded (LIFO).
+    """
     def __init__(self, config, restart):
         self.logger = get_logger("FRONTIER")
         self.config = config
@@ -36,7 +38,7 @@ class Frontier(object):
                     self.add_url(url)
 
     def _parse_save_file(self):
-        ''' This function can be overridden for alternate saving techniques. '''
+        ''' Reloads uncompleted URLs, dropping any that the current filters now reject. '''
         total_count = len(self.save)
         tbd_count = 0
         for url, completed in self.save.values():
@@ -46,12 +48,14 @@ class Frontier(object):
         self.logger.info(f"Found {tbd_count} urls to be downloaded from {total_count} " f"total urls discovered.")
 
     def get_tbd_url(self):
+        """Returns the next URL to download, or None when the frontier is empty."""
         try:
             return self.to_be_downloaded.pop()
         except IndexError:
             return None
 
     def add_url(self, url):
+        """Cleans a URL and queues it if it is valid and has never been seen."""
         url = prepare_url(url)
         if url is None:
             return
@@ -62,6 +66,7 @@ class Frontier(object):
             self.to_be_downloaded.append(url)
     
     def mark_url_complete(self, url):
+        """Records that a URL has been processed so it is never fetched again."""
         urlhash = get_urlhash(url)
         if urlhash not in self.save:
             # This should not happen.
