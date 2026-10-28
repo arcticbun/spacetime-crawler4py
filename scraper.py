@@ -92,16 +92,18 @@ def extract_next_links(url, resp):
     if not words:
         return []
 
-    # Record page stats and evaluate near-duplicate expansion
-    record_page(page_url, words)
-    if not should_expand_page(page_url, words):
-        return []
-    
+    # EXTRACT LINKS FIRST: Ensure parent page links are captured
     links = set()
     for anchor in soup.find_all("a", href=True):
         clean_url = prepare_url(anchor["href"], page_url)
         if clean_url is not None:
             links.add(clean_url)
+
+    # Record page stats and evaluate near-duplicate status
+    record_page(page_url, words)
+    should_expand_page(page_url, words)
+    
+    # Always return extracted links so child pages (like all.html) reach the frontier
     return list(links)
 
 def is_valid(url):
@@ -124,7 +126,7 @@ def is_valid(url):
         path = parsed.path.lower()
 
         # Strict boundary check for extensionless binary/kernel paths
-        if re.search(r"/(zimage|vmlinuz|boot|firmware|binaries)(?:/|[\?#]|$)", path):
+        if re.search(r"/(zimage|vmlinuz|boot|firmware|binaries)", path):
             return False
 
         clean_path = path.rstrip('/')
