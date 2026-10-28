@@ -34,8 +34,7 @@ def _connect(db_path):
             # One row per unique URL; feeds every answer in the report.
             db.execute("""
                 CREATE TABLE IF NOT EXISTS pages (
-                    url_key TEXT PRIMARY KEY,
-                    url TEXT NOT NULL,
+                    url TEXT PRIMARY KEY,
                     hostname TEXT NOT NULL,
                     word_count INTEGER NOT NULL,
                     word_counts TEXT NOT NULL
@@ -43,17 +42,16 @@ def _connect(db_path):
             """)
             # Content fingerprints and the duplicate verdict for each URL.
             db.execute("""
-                CREATE TABLE IF NOT EXISTS content_checks (
-                    url_key TEXT PRIMARY KEY,
-                    url TEXT NOT NULL,
+                CREATE TABLE IF NOT EXISTS page_checks (
+                    url TEXT PRIMARY KEY,
                     fingerprint TEXT NOT NULL,
                     simhash TEXT NOT NULL,
                     status TEXT NOT NULL
                 )
             """)
             db.execute("""
-                CREATE INDEX IF NOT EXISTS content_checks_fingerprint
-                ON content_checks (fingerprint)
+                CREATE INDEX IF NOT EXISTS page_checks_fingerprint
+                ON page_checks (fingerprint)
             """)
             # Running count of low-value pages seen in each page family.
             db.execute("""
@@ -75,37 +73,39 @@ def record_page(url, words, db_path=DB_PATH):
         with db:
             db.execute("""
                 INSERT OR IGNORE INTO pages
-                    (url_key, url, hostname, word_count, word_counts)
-                VALUES (?, ?, ?, ?, ?)
-            """, (url_key(url), url, hostname, len(words), counts))
+                    (url, hostname, word_count, word_counts)
+                VALUES (?, ?, ?, ?)
+            """, (url_key(url), hostname, len(words), counts))
 
 
-def classify_page(url, words, db_path=DB_PATH):
+def classify_page(url, words, links=(), db_path=DB_PATH):
     """Classifies a page's content as "unique", "exact" or "near".
 
-    "exact" means another URL already had exactly the same text (SHA-256 of
-    the token stream). "near" means another unique page's SimHash is within
+    "exact" means another URL already had exactly the same text and the same
+    outgoing links (SHA-256 of both), so expanding it would add nothing.
+    "near" means another unique page's SimHash is within
     NEAR_DUPLICATE_DISTANCE bits. The verdict is stored, so asking again for
     the same URL returns the same answer.
     """
     key = url_key(url)
-    exact_fingerprint = sha256(" ".join(words).encode("utf-8")).hexdigest()
+    exact_content = " ".join(words) + "\n" + "\n".join(sorted(links))
+    exact_fingerprint = sha256(exact_content.encode("utf-8")).hexdigest()
     simhash_fp = compute_simhash_64(words)
 
     with closing(_connect(db_path)) as db:
         with db:
             # Same URL reached again (e.g. through a redirect): reuse verdict.
             existing = db.execute(
-                "SELECT status FROM content_checks WHERE url_key = ?", (key,)
+                "SELECT status FROM page_checks WHERE url = ?", (key,)
             ).fetchone()
             if existing is not None:
                 return existing[0]
 
             simhashes = _load_simhashes(db, db_path)
 
-            # 1. Exact duplicate: identical text already seen at another URL.
+            # 1. Exact duplicate: identical text and links already seen at another URL.
             if db.execute(
-                "SELECT 1 FROM content_checks WHERE fingerprint = ? LIMIT 1",
+                "SELECT 1 FROM page_checks WHERE fingerprint = ? LIMIT 1",
                 (exact_fingerprint,),
             ).fetchone():
                 status = "exact"
@@ -118,9 +118,9 @@ def classify_page(url, words, db_path=DB_PATH):
                 simhashes.append(simhash_fp)
 
             db.execute("""
-                INSERT INTO content_checks (url_key, url, fingerprint, simhash, status)
-                VALUES (?, ?, ?, ?, ?)
-            """, (key, url, exact_fingerprint, f"{simhash_fp:016x}", status))
+                INSERT INTO page_checks (url, fingerprint, simhash, status)
+                VALUES (?, ?, ?, ?)
+            """, (key, exact_fingerprint, f"{simhash_fp:016x}", status))
             return status
 
 
@@ -128,7 +128,7 @@ def _load_simhashes(db, db_path):
     """Loads unique pages' SimHashes from disk once, then serves them from memory."""
     if db_path not in _simhashes:
         rows = db.execute(
-            "SELECT simhash FROM content_checks WHERE status = 'unique'"
+            "SELECT simhash FROM page_checks WHERE status = 'unique'"
         ).fetchall()
         _simhashes[db_path] = [int(simhash_hex, 16) for (simhash_hex,) in rows]
     return _simhashes[db_path]
@@ -139,10 +139,11 @@ def page_family(url):
 
     The family is the host, the parent directory with digits collapsed to
     "#", and the sorted names of the query parameters. For example
-    /events/2023/page?id=7 and /events/2024/page?id=9 share a family.
+    /events/2023/page?id=7 and /events/2024/page?id=9 share a family, and so
+    do /catalog/alpha/ and /catalog/beta (a trailing slash is ignored).
     """
     parsed = urlparse(url)
-    parent = re.sub(r"\d+", "#", parsed.path.rsplit("/", 1)[0] + "/")
+    parent = re.sub(r"\d+", "#", parsed.path.rstrip("/").rsplit("/", 1)[0] + "/")
     keys = sorted({key.lower() for key, _ in parse_qsl(parsed.query, keep_blank_values=True)})
     return f"{(parsed.hostname or '').lower()}{parent}?{'&'.join(keys)}"
 

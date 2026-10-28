@@ -20,6 +20,16 @@ MAX_CONTENT_BYTES = 5 * 1024 * 1024
 # family is within budget (see crawl_stats.consume_family_budget).
 LOW_INFO_WORDS = 50
 
+# Pages shorter than this that say access is denied, or that show a password
+# field outside the site navigation, are access walls (login/denied pages).
+# Longer pages, such as tutorials about permissions or login forms, never are.
+ACCESS_WALL_MAX_WORDS = 300
+DENIAL_PHRASES = re.compile(
+    r"\b(access denied|permission denied|insufficient (access )?privileges"
+    r"|authentication required|not authorized|you do not have permission"
+    r"|you don't have permission|please log ?in|you must (be )?log(ged)? ?in)\b"
+)
+
 # Parsed robots.txt rules, keyed by lowercase hostname.
 ROBOTS_PARSERS = {}
 CRAWLER_USER_AGENT = "*"
@@ -138,11 +148,11 @@ def extract_next_links(url, resp):
     record_page(page_url, words)
 
     # Access-denied and login pages have no content and no useful links
-    if is_access_wall(soup):
+    if is_access_wall(soup, words):
         return []
 
-    # Same text as a page we already expanded: its links add nothing new
-    status = classify_page(page_url, words)
+    # Same text and same links as a page we already saw: nothing new to expand
+    status = classify_page(page_url, words, links)
     if status == "exact":
         return []
 
@@ -155,51 +165,23 @@ def extract_next_links(url, resp):
 
     return list(links)
 
-def is_access_wall(soup):
-    """Detects "access denied" and login pages.
+def is_access_wall(soup, words):
+    """Detects short "access denied" and login pages.
 
-    A page is an access wall when its first main heading is a denial message,
-    when a login/denial heading appears together with a password field, or
-    when a password field is the only thing outside the site chrome
-    (header, footer, sidebar, forms).
+    A page is an access wall when it has fewer than ACCESS_WALL_MAX_WORDS
+    words and either says access is denied or contains a password field
+    outside its header, navigation, footer or sidebar.
     """
-    content = soup.find("main") or soup.find("article") or soup.body or soup
-    content = content.find("article") or content
-
-    # Elements that hold site-wide navigation rather than page content
-    chrome = {"head", "header", "footer", "aside", "form"}
-    if content.name not in {"main", "article"} and content.find(["header", "footer", "aside"]):
-        chrome.add("nav")
-
-    # Normalized h1/h2 text from the content area, in document order
-    headings = [
-        " ".join(heading.get_text(" ", strip=True).lower().split()).rstrip(".!:")
-        for heading in content.find_all(["h1", "h2"])
-        if not any(parent.name in chrome for parent in heading.parents)
-    ]
-    denial_headings = {"insufficient access privileges", "access denied",
-                       "permission denied", "authentication required"}
-    if content.name != "article" and headings and headings[0] in denial_headings:
-        return True
-
-    # Password fields outside navigation areas mark a login form
-    password_form = any(
-        not any(parent.name in {"nav", "header", "footer", "aside"} for parent in field.parents)
-        for field in content.find_all("input", type=re.compile(r"^password$", re.I))
-    )
-    if not password_form:
+    if len(words) >= ACCESS_WALL_MAX_WORDS:
         return False
-
-    auth_headings = headings[:1] if content.name == "article" else headings
-    if set(auth_headings) & (denial_headings | {"login", "log in", "sign in"}):
+    if DENIAL_PHRASES.search(" ".join(words)):
         return True
 
-    # A password form with no other visible text outside the chrome
-    has_content_text = any(
-        re.search(r"[a-z]", text, re.I) and not any(parent.name in chrome for parent in text.parents)
-        for text in content.strings
-    )
-    return not has_content_text
+    # A login box in the site header doesn't make the page itself a login page
+    for field in soup.find_all("input", type=re.compile(r"^password$", re.I)):
+        if not any(parent.name in {"header", "nav", "footer", "aside"} for parent in field.parents):
+            return True
+    return False
 
 def is_valid(url):
     """Decides whether a URL should be crawled.
@@ -225,8 +207,10 @@ def is_valid(url):
 
         path = parsed.path.lower()
 
-        # Directory names need boundaries; kernel filenames can have version/build suffixes.
-        if re.search(
+        # Kernel images and firmware/binary directories. Directory names need
+        # boundaries; kernel filenames can have version/build suffixes. Web
+        # pages (e.g. /firmware/research.html) are still crawled.
+        if not re.search(r"\.(s?html?|php|aspx?|jsp)$", path) and re.search(
             r"/(?:boot|firmware|binaries)(?:/|$)"
             r"|/(?:zimage|vmlinuz)(?:[_.0-9-][^/]*)?(?:/|$)", unquote(path).lower()
         ):
@@ -289,24 +273,33 @@ def is_url_trap(parsed):
     if re.search(r"/(pipermail|mailman/listinfo|mailman/options|mailman/admin)/", path_lower):
         return True
 
-    # 5a. Calendar export downloads (.ics files behind a query parameter)
-    if {"ical", "outlook-ical"}.intersection(keys):
+    # 5a. Calendar plugin parameters (The Events Calendar): .ics exports and
+    #     list/month/day views, e.g. ?eventDisplay=past&paged=500 pages back
+    #     through every past event forever
+    if {"ical", "outlook-ical", "eventdisplay", "tribe_event_display",
+            "tribe-bar-date", "eventdate"}.intersection(keys):
         return True
 
-    # 5b. Calendar listing navigation, including full dates and missing trailing
-    #     slashes. Individual event slugs and ordinary dated articles stay crawlable.
+    # 5b. Dated calendar views in the path, e.g. /events/month/2023-05/,
+    #     /events/2023-05-01/ or /calendar/2023/05/
     calendar_path = unquote(path_lower).lower()
-    calendar_route = re.search(r"/(?:events?|calendar)(?:\.php)?(?:/|$)", calendar_path)
-    calendar_root = calendar_path.rstrip("/") in {"", "/index.php"} and {"month", "year"}.issubset(keys)
-    # eventdisplay=past&paged=N pages back through every past event, forever
-    calendar_keys = {"calendar", "eventdate", "eventdisplay", "tribe-bar-date", "tribe_event_display"}
-    date_keys = calendar_keys | {"date", "day", "week", "month", "year"}
-    if (calendar_route or calendar_root or calendar_keys.intersection(keys)) and (
-        date_keys.intersection(keys) or re.search(
-            r"/\d{4}(?:-\d{1,2}(?:-\d{1,2})?|/\d{1,2}(?:/\d{1,2})?)?"
-            r"(?:/page/\d+)?/?$", calendar_path
-        )
+    if re.search(
+        r"/(?:events?|calendar)(?:\.php)?/(?:.*/)?"
+        r"\d{4}(?:-\d{1,2}(?:-\d{1,2})?|/\d{1,2}(?:/\d{1,2})?)?"
+        r"(?:/page/\d+)?/?$", calendar_path
     ):
+        return True
+
+    # 5c. Date parameters on a calendar listing page. Individual events with a
+    #     date (e.g. /events/research-talk/?date=...) are allowed; repeats of
+    #     one event are near-duplicates and are bounded by the family budget.
+    calendar_listing = re.search(
+        r"/(?:events?|calendar)(?:\.php)?"
+        r"(?:/(?:list|month|week|day|today|upcoming|past|photo|map))?/?$", calendar_path
+    )
+    calendar_root = calendar_path.rstrip("/") in {"", "/index.php"} and {"month", "year"}.issubset(keys)
+    if (calendar_listing or calendar_root or "calendar" in keys) and \
+            {"date", "day", "week", "month", "year"}.intersection(keys):
         return True
 
     # 6. Wiki traps (DokuWiki, Trac, & MediaWiki actions/revisions/diffs/versions)

@@ -17,6 +17,9 @@ MAX_RETRIES = 3
 # Seconds to back off after a network failure before trying again.
 RETRY_BACKOFF = 5
 
+# Seconds to wait before trying again while the cache server is unreachable.
+OUTAGE_BACKOFF = 60
+
 class Worker(Thread):
     def __init__(self, worker_id, config, frontier):
         self.logger = get_logger(f"Worker-{worker_id}", "Worker")
@@ -41,10 +44,24 @@ class Worker(Thread):
         crawl_delay = scraper.get_crawl_delay(hostname)
         return max(self.config.time_delay, crawl_delay or 0)
 
+    def cache_is_reachable(self, failed_url):
+        """Tells a cache outage apart from one bad URL.
+
+        Downloads a seed URL other than the one that failed; if that also gets
+        no response, the cache server is down and the failure is not the URL's
+        fault.
+        """
+        seeds = [seed.strip() for seed in self.config.seed_urls]
+        probe_url = next((seed for seed in seeds if seed != failed_url), seeds[0])
+        resp = download(probe_url, self.config, self.logger)
+        time.sleep(self.config.time_delay)
+        return resp.status != 0
+
     def process_domain_discovery(self, hostname):
         """Fetches a host's robots.txt once, registering its rules and sitemaps.
 
-        Returns "retry" if the fetch failed temporarily, otherwise "ready".
+        Returns "outage" if the cache server is unreachable, "retry" if the
+        fetch failed temporarily, otherwise "ready".
         If robots.txt cannot be used (redirect loop, redirect off-domain,
         repeated failures) the host is crawled with no robots rules rather
         than stopping the crawler.
@@ -64,6 +81,10 @@ class Worker(Thread):
 
             resp = download(robots_url, self.config, self.logger)
             time.sleep(self.config.time_delay)
+
+            # The cache itself is down: wait without counting it against the host
+            if resp.status == 0 and not self.cache_is_reachable(robots_url):
+                return "outage"
 
             # Temporary failure: retry later, but only a few times
             if resp.status == 0 or 500 <= resp.status <= 599:
@@ -114,7 +135,13 @@ class Worker(Thread):
 
             # Perform domain discovery (robots.txt & sitemap) on new hostnames
             hostname = (urlparse(tbd_url).hostname or "").lower()
-            if self.process_domain_discovery(hostname) == "retry":
+            discovery = self.process_domain_discovery(hostname)
+            if discovery == "outage":
+                self.logger.error("Cache server unreachable; waiting %ds before retrying %s", OUTAGE_BACKOFF, tbd_url)
+                self.frontier.requeue_url(tbd_url)
+                time.sleep(OUTAGE_BACKOFF)
+                continue
+            if discovery == "retry":
                 self.frontier.requeue_url(tbd_url)
                 time.sleep(RETRY_BACKOFF)
                 continue
@@ -139,9 +166,18 @@ class Worker(Thread):
                 time.sleep(delay)
                 continue
 
-            # Handle network connection drop (status == 0): retry a few times,
-            # then give up so one bad URL can't loop forever
+            # Handle network connection drop (status == 0)
             if resp.status == 0:
+                # The cache is down: keep the URL and wait, without counting
+                # the failure against it
+                if not self.cache_is_reachable(tbd_url):
+                    self.logger.error("Cache server unreachable; waiting %ds before retrying %s", OUTAGE_BACKOFF, tbd_url)
+                    self.frontier.requeue_url(tbd_url)
+                    time.sleep(OUTAGE_BACKOFF)
+                    continue
+
+                # Only this URL fails: retry a few times, then give up so one
+                # bad URL can't loop forever
                 self.url_failures[tbd_url] += 1
                 if self.url_failures[tbd_url] >= MAX_RETRIES:
                     self.logger.error("Giving up on %s after %d failures: %s", tbd_url, MAX_RETRIES, resp.error)

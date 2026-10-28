@@ -25,13 +25,14 @@ def get_logger(name, filename=None):
 def url_key(url):
     """Returns the identity of a URL used for uniqueness checks.
 
-    The fragment is discarded (per the assignment's definition of a unique
-    page), the host is lowercased, an empty path becomes "/", and the scheme
-    is dropped so http:// and https:// copies of a page count once.
+    Per the assignment, a unique page is its URL without the fragment. The
+    scheme and host are lowercased and an empty path becomes "/", since
+    those spell the same URL. For URLs cleaned by scraper.prepare_url this
+    is the URL itself.
     """
     clean_url, _ = urldefrag(url)
     parsed = urlsplit(clean_url)
-    return urlunsplit(("", parsed.netloc.lower(), parsed.path or "/", parsed.query, ""))
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path or "/", parsed.query, ""))
 
 
 def get_urlhash(url):

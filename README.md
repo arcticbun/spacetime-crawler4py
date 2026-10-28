@@ -176,7 +176,7 @@ You can safely run SQL queries against `crawl_stats.sqlite3` in your terminal wh
 
 * **Duplicate Detection Breakdown (unique / exact / near):**
   ```bash
-  sqlite3 crawl_stats.sqlite3 "SELECT status, COUNT(*) FROM content_checks GROUP BY status;"
+  sqlite3 crawl_stats.sqlite3 "SELECT status, COUNT(*) FROM page_checks GROUP BY status;"
   ```
 
 * **Page Families That Hit the Low-Value Budget (likely traps):**
