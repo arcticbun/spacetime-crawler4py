@@ -29,7 +29,8 @@ def record_page(url, words, db_path="crawl_stats.sqlite3"):
                 VALUES (?, ?, ?, ?)
             """, (url, hostname, len(words), counts))
 
-def should_expand_page(url, words, db_path="crawl_stats.sqlite3"):
+def should_expand_page(url, words, db_path="crawl_stats.sqlite3", *, allow_expansion=None):
+    """Use similarity unless the scraper explicitly identifies content or an access wall."""
     url, _ = urldefrag(url)
     exact_fingerprint = sha256(" ".join(words).encode("utf-8")).hexdigest()
     simhash_fp = compute_simhash_64(words)
@@ -47,36 +48,30 @@ def should_expand_page(url, words, db_path="crawl_stats.sqlite3"):
                 )
             """)
 
-            # 1. Exact Duplicate Check
-            existing = db.execute("""
-                SELECT expand FROM content_checks
-                WHERE fingerprint = ? AND url = ?
-            """, (exact_fingerprint, url)).fetchone()
-            if existing is not None:
-                return bool(existing[0])
+            expand = allow_expansion
+            if expand is None:
+                existing = db.execute("""
+                    SELECT expand FROM content_checks
+                    WHERE fingerprint = ? AND url = ?
+                """, (exact_fingerprint, url)).fetchone()
+                if existing is not None:
+                    return bool(existing[0])
 
-            # 2. Near-Duplicate Check using SimHash Hamming Distance
-            rows = db.execute("""
-                SELECT simhash FROM content_checks
-                WHERE expand = 1
-            """).fetchall()
+                rows = db.execute("""
+                    SELECT simhash FROM content_checks WHERE expand = 1
+                """).fetchall()
+                expand = not any(
+                    hamming_distance(simhash_fp, int(previous, 16)) <= 4
+                    for (previous,) in rows
+                )
 
-            for (prev_simhash_hex,) in rows:
-                prev_simhash = int(prev_simhash_hex, 16)
-                # Distance threshold increased to <= 4 to catch wiki/login template drift
-                if hamming_distance(simhash_fp, prev_simhash) <= 4:
-                    db.execute("""
-                        INSERT INTO content_checks (fingerprint, simhash, url, expand)
-                        VALUES (?, ?, ?, 0)
-                    """, (exact_fingerprint, simhash_hex, url))
-                    return False
-
-            # Allow page expansion
+            # Store the actual expansion decision, including overrides of older decisions.
             db.execute("""
                 INSERT INTO content_checks (fingerprint, simhash, url, expand)
-                VALUES (?, ?, ?, 1)
-            """, (exact_fingerprint, simhash_hex, url))
-            return True
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(fingerprint, url) DO UPDATE SET expand = excluded.expand
+            """, (exact_fingerprint, simhash_hex, url, int(expand)))
+            return bool(expand)
 
 def compute_simhash_64(words):
     if not words:

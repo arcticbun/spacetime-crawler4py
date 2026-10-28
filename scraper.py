@@ -92,19 +92,55 @@ def extract_next_links(url, resp):
     if not words:
         return []
 
-    # EXTRACT LINKS FIRST: Ensure parent page links are captured
+    # Preserve useful child links even when a page resembles another page.
     links = set()
     for anchor in soup.find_all("a", href=True):
         clean_url = prepare_url(anchor["href"], page_url)
         if clean_url is not None:
             links.add(clean_url)
 
-    # Record page stats and evaluate near-duplicate status
+    # URL counting is independent of whether this page's links are followed.
     record_page(page_url, words)
-    should_expand_page(page_url, words)
-    
-    # Always return extracted links so child pages (like all.html) reach the frontier
+    if not should_expand_page(
+        page_url, words, allow_expansion=page_expansion_override(soup)
+    ):
+        return []
     return list(links)
+
+
+def page_expansion_override(soup):
+    """Allow content/hubs, reject access walls; let similarity gate navigation-only pages."""
+    content = soup.find("main") or soup.find("article") or soup.body or soup
+    content = content.find("article") or content
+    chrome = {"head", "header", "footer", "aside", "form"}
+    if content.name not in {"main", "article"} and content.find(["header", "footer", "aside"]):
+        chrome.add("nav")
+    headings = [
+        " ".join(heading.get_text(" ", strip=True).lower().split()).rstrip(".!:")
+        for heading in content.find_all(["h1", "h2"])
+        if not any(parent.name in chrome for parent in heading.parents)
+    ]
+    denial_headings = {"insufficient access privileges", "access denied",
+                       "permission denied", "authentication required"}
+    if content.name != "article" and headings and headings[0] in denial_headings:
+        return False
+    password_form = any(
+        not any(parent.name in {"nav", "header", "footer", "aside"} for parent in field.parents)
+        for field in content.find_all("input", type=re.compile(r"^password$", re.I))
+    )
+    auth_headings = headings[:1] if content.name == "article" else headings
+    if (set(auth_headings) & (denial_headings | {"login", "log in", "sign in"})
+            and password_form):
+        return False
+
+    # Even a one-word link outside site chrome can be a useful navigation hub.
+    for text in content.strings:
+        if re.search(r"[a-z]", text, re.I) and not any(
+            parent.name in chrome for parent in text.parents
+        ):
+            return True
+    return False if password_form else None
+
 
 def is_valid(url):
     try:
@@ -125,8 +161,11 @@ def is_valid(url):
 
         path = parsed.path.lower()
 
-        # Strict boundary check for extensionless binary/kernel paths
-        if re.search(r"/(zimage|vmlinuz|boot|firmware|binaries)", path):
+        # Directory names need boundaries; kernel filenames can have version/build suffixes.
+        if re.search(
+            r"/(?:boot|firmware|binaries)(?:/|$)"
+            r"|/(?:zimage|vmlinuz)(?:[_.0-9-][^/]*)?(?:/|$)", unquote(path).lower()
+        ):
             return False
 
         clean_path = path.rstrip('/')
@@ -152,7 +191,11 @@ def extract_words(soup):
 def is_url_trap(parsed):
     path_lower = parsed.path.lower()
     query_lower = parsed.query.lower()
-    full_url_lower = path_lower + "?" + query_lower
+    try:
+        parameters = parse_qsl(parsed.query, keep_blank_values=True, max_num_fields=15)
+    except ValueError:
+        return True
+    keys = [key.lower() for key, value in parameters]
 
     # 1. Cyclic repeating path sequences
     if re.search(r"^.*?/(.*?/)\1{2,}", path_lower):
@@ -173,8 +216,19 @@ def is_url_trap(parsed):
     if re.search(r"/(pipermail|mailman/listinfo|mailman/options|mailman/admin)/", path_lower):
         return True
 
-    # 5. Calendar and date infinite navigation
-    if re.search(r"(\?.*?(date|ical|outlook-ical|calendar|day|month|year)=|/\d{4}-\d{2}/|/\d{4}/\d{2}/)", full_url_lower):
+    # 5. Calendar listing navigation, including full dates and missing trailing slashes.
+    # Keep individual event slugs and ordinary dated articles crawlable.
+    calendar_path = unquote(path_lower).lower()
+    calendar_route = re.search(r"/(?:events|calendar)(?:\.php)?(?:/|$)", calendar_path)
+    calendar_root = calendar_path.rstrip("/") in {"", "/index.php"} and {"month", "year"}.issubset(keys)
+    calendar_keys = {"calendar", "eventdate", "tribe-bar-date", "tribe_event_display"}
+    date_keys = calendar_keys | {"date", "ical", "outlook-ical", "day", "month", "year"}
+    if (calendar_route or calendar_root or calendar_keys.intersection(keys)) and (
+        date_keys.intersection(keys) or re.search(
+            r"/\d{4}(?:-\d{1,2}(?:-\d{1,2})?|/\d{1,2}(?:/\d{1,2})?)?"
+            r"(?:/page/\d+)?/?$", calendar_path
+        )
+    ):
         return True
 
     # 6. Wiki traps (DokuWiki, Trac, & MediaWiki actions/revisions/diffs/versions)
@@ -217,15 +271,10 @@ def is_url_trap(parsed):
     if re.search(r"/(sld\d+|v\d+_slide\d+|slide\d+|frame)\.htm[l]?$", path_lower):
         return True
 
-    try:
-        parameters = parse_qsl(parsed.query, keep_blank_values=True, max_num_fields=15)
-        keys = [key.lower() for key, value in parameters]
-        session_keys = {"sid", "sessionid", "phpsessid", "jsessionid"}
-        if any(key in session_keys for key in keys):
-            return True
-        if keys and max(Counter(keys).values()) >= 3:
-            return True
-    except ValueError:
+    session_keys = {"sid", "sessionid", "phpsessid", "jsessionid"}
+    if any(key in session_keys for key in keys):
+        return True
+    if keys and max(Counter(keys).values()) >= 3:
         return True
 
     return False
