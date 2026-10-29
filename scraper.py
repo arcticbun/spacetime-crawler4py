@@ -258,11 +258,12 @@ def is_url_trap(parsed):
     if re.search(r"/(pipermail|mailman/listinfo|mailman/options|mailman/admin)/", path_lower):
         return True
 
-    # 5a. Calendar plugin parameters (The Events Calendar): .ics exports and
-    #     list/month/day views, e.g. ?eventDisplay=past&paged=500 pages back
-    #     through every past event forever
-    if {"ical", "outlook-ical", "eventdisplay", "tribe_event_display",
-            "tribe-bar-date", "eventdate"}.intersection(keys):
+    # 5a. Calendar plugin parameters (The Events Calendar): .ics exports,
+    #     list/month/day views and filters, e.g. ?eventDisplay=past&paged=500
+    #     pages back through every past event forever, and every tribe*
+    #     parameter (tribe-bar-date, tribe__ecp_custom_81[0]=...) is a filter
+    if {"ical", "outlook-ical", "eventdisplay", "eventdate"}.intersection(keys) or \
+            any(key.startswith("tribe") for key in keys):
         return True
 
     # 5b. Dated calendar views in the path, e.g. /events/month/2023-05/,
@@ -285,6 +286,14 @@ def is_url_trap(parsed):
     calendar_root = calendar_path.rstrip("/") in {"", "/index.php"} and {"month", "year"}.issubset(keys)
     if (calendar_listing or calendar_root or "calendar" in keys) and \
             {"date", "day", "week", "month", "year"}.intersection(keys):
+        return True
+
+    # 5d. Alternate calendar views of one category/tag/venue, e.g.
+    #     /events/category/mentorship/month/: the same events in another layout
+    if re.search(
+        r"/events?/(?:category|tag|venue|organizer|series)/.+"
+        r"/(?:list|month|week|day|today|upcoming|past|photo|map|summary)/?$", calendar_path
+    ):
         return True
 
     # 6. Wiki traps (DokuWiki, Trac, & MediaWiki actions/revisions/diffs/versions)
@@ -327,7 +336,34 @@ def is_url_trap(parsed):
     if re.search(r"/(sld\d+|v\d+_slide\d+|slide\d+|frame)\.htm[l]?$", path_lower):
         return True
 
-    # 16. Session IDs and repeated query keys
+    # 16. DokuWiki: private namespaces whose pages are almost all the same
+    #     ~100-word "permission denied" page (wiki.ics.uci.edu, first deployment
+    #     crawl: group 571/574 near-duplicates, software 40/43, requesttracker
+    #     38/43), and s[]= search-highlight copies of ordinary pages
+    if "doku.php" in path_lower:
+        page_id = path_lower.split("doku.php", 1)[1].lstrip("/") or dict(parameters).get("id", "").lower()
+        if page_id.split(":", 1)[0] in {"group", "software", "requesttracker"}:
+            return True
+    if any(key.startswith("s[") for key in keys):
+        return True
+
+    # 17. Trac project sections (grape.ics.uci.edu/wiki/<project>/...): the
+    #     timeline pages back through history forever and most of these return
+    #     403; attachments are file downloads. Only /wiki/<project>/wiki/ pages
+    #     hold content.
+    if re.search(
+        r"^/(?:wiki|trac)/[^/]+/(?:timeline|changeset|log|browser|report|query|prefs|register|about"
+        r"|search|newticket|diff|attachment|raw-attachment|zip-attachment)(?:/|$)", path_lower
+    ):
+        return True
+
+    # 18. WordPress archive listings: tag and author pages and numbered
+    #     pagination only repeat excerpts of posts that are crawled directly.
+    #     Category landing pages are kept as link hubs.
+    if re.search(r"/(?:tag|author)/|/page/\d+/?$", path_lower) or "paged" in keys:
+        return True
+
+    # 19. Session IDs and repeated query keys
     session_keys = {"sid", "sessionid", "phpsessid", "jsessionid"}
     if any(key in session_keys for key in keys):
         return True
