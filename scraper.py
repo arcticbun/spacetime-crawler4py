@@ -20,16 +20,6 @@ MAX_CONTENT_BYTES = 5 * 1024 * 1024
 # family is within budget (see crawl_stats.consume_family_budget).
 LOW_INFO_WORDS = 50
 
-# Site-wide areas (navigation, headers, footers) that are not a page's own content.
-CHROME_TAGS = {"head", "header", "nav", "footer", "aside"}
-
-# Low-information pages whose own text says access is denied are access walls.
-DENIAL_PHRASES = re.compile(
-    r"\b(access denied|permission denied|insufficient (access )?privileges"
-    r"|authentication required|not authorized|you do not have permission"
-    r"|you don't have permission|please log ?in|you must (be )?log(ged)? ?in)\b"
-)
-
 # Parsed robots.txt rules, keyed by lowercase hostname.
 ROBOTS_PARSERS = {}
 CRAWLER_USER_AGENT = "*"
@@ -147,46 +137,20 @@ def extract_next_links(url, resp):
     # Every page with text counts toward the report (uniqueness is by URL)
     record_page(page_url, words)
 
-    # Access-denied and login pages have no content and no useful links
-    if is_access_wall(soup):
-        return []
-
     # Same text and same links as a page we already saw: nothing new to expand
     status = classify_page(page_url, words, links)
     if status == "exact":
         return []
 
-    # Near-duplicates and low-information pages may still link to real
-    # content (e.g. index pages), so follow them until their family proves
-    # to be a repetitive, low-value set of pages
+    # Near-duplicates and low-information pages (including login and
+    # access-denied pages) may still link to real content (e.g. index
+    # pages), so follow them until their family proves to be a repetitive,
+    # low-value set of pages
     if status == "near" or len(words) < LOW_INFO_WORDS:
         if not consume_family_budget(page_url):
             return []
 
     return list(links)
-
-def is_access_wall(soup):
-    """Detects "access denied" and login pages.
-
-    Only the page's own text counts (CHROME_TAGS are ignored, so a "Please
-    log in" link in a site header doesn't matter). A page is an access wall
-    when that text is low information (fewer than LOW_INFO_WORDS words) and
-    either says access is denied or comes with a password field.
-    """
-    content_text = " ".join(
-        text for text in soup.strings
-        if not any(parent.name in CHROME_TAGS for parent in text.parents)
-    ).lower()
-    if len(re.findall(r"\b[a-z]+(?:'[a-z]+)?\b", content_text)) >= LOW_INFO_WORDS:
-        return False
-    if DENIAL_PHRASES.search(" ".join(content_text.split())):
-        return True
-
-    # A login form in the page body (not a login box in the site chrome)
-    for field in soup.find_all("input", type=re.compile(r"^password$", re.I)):
-        if not any(parent.name in CHROME_TAGS for parent in field.parents):
-            return True
-    return False
 
 def is_valid(url):
     """Decides whether a URL should be crawled.
