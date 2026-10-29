@@ -181,7 +181,7 @@ You can safely run SQL queries against `crawl_stats.sqlite3` in your terminal wh
 
 * **Page Families That Hit the Low-Value Budget (likely traps):**
   ```bash
-  sqlite3 crawl_stats.sqlite3 "SELECT family, count FROM families WHERE count > 25 ORDER BY count DESC LIMIT 15;"
+  sqlite3 crawl_stats.sqlite3 "SELECT family, COUNT(*) AS pages FROM family_pages GROUP BY family HAVING pages > 25 ORDER BY pages DESC LIMIT 15;"
   ```
 
 ### 4. Live Auto-Refresh Dashboard

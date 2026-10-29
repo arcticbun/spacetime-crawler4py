@@ -53,12 +53,18 @@ def _connect(db_path):
                 CREATE INDEX IF NOT EXISTS page_checks_fingerprint
                 ON page_checks (fingerprint)
             """)
-            # Running count of low-value pages seen in each page family.
+            # Low-value pages charged to each page family, with the decision
+            # made for each, so reprocessing a page after a restart repeats it.
             db.execute("""
-                CREATE TABLE IF NOT EXISTS families (
-                    family TEXT PRIMARY KEY,
-                    count INTEGER NOT NULL
+                CREATE TABLE IF NOT EXISTS family_pages (
+                    url TEXT PRIMARY KEY,
+                    family TEXT NOT NULL,
+                    allowed INTEGER NOT NULL
                 )
+            """)
+            db.execute("""
+                CREATE INDEX IF NOT EXISTS family_pages_family
+                ON family_pages (family)
             """)
         _initialized.add(db_path)
     return db
@@ -152,19 +158,28 @@ def consume_family_budget(url, db_path=DB_PATH):
     """Counts one low-value page against its family's budget.
 
     Returns True while the family is still within FAMILY_BUDGET, i.e. its
-    links are still worth following.
+    links are still worth following. A page is charged only once: asking
+    again for the same URL returns the original decision.
     """
+    key = url_key(url)
     family = page_family(url)
     with closing(_connect(db_path)) as db:
         with db:
-            db.execute("""
-                INSERT INTO families (family, count) VALUES (?, 1)
-                ON CONFLICT(family) DO UPDATE SET count = count + 1
-            """, (family,))
-            (count,) = db.execute(
-                "SELECT count FROM families WHERE family = ?", (family,)
+            existing = db.execute(
+                "SELECT allowed FROM family_pages WHERE url = ?", (key,)
             ).fetchone()
-    return count <= FAMILY_BUDGET
+            if existing is not None:
+                return bool(existing[0])
+
+            (count,) = db.execute(
+                "SELECT COUNT(*) FROM family_pages WHERE family = ?", (family,)
+            ).fetchone()
+            allowed = count < FAMILY_BUDGET
+            db.execute(
+                "INSERT INTO family_pages (url, family, allowed) VALUES (?, ?, ?)",
+                (key, family, int(allowed)),
+            )
+    return allowed
 
 
 def compute_simhash_64(words):

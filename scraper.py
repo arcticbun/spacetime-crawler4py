@@ -20,10 +20,10 @@ MAX_CONTENT_BYTES = 5 * 1024 * 1024
 # family is within budget (see crawl_stats.consume_family_budget).
 LOW_INFO_WORDS = 50
 
-# Pages shorter than this that say access is denied, or that show a password
-# field outside the site navigation, are access walls (login/denied pages).
-# Longer pages, such as tutorials about permissions or login forms, never are.
-ACCESS_WALL_MAX_WORDS = 300
+# Site-wide areas (navigation, headers, footers) that are not a page's own content.
+CHROME_TAGS = {"head", "header", "nav", "footer", "aside"}
+
+# Low-information pages whose own text says access is denied are access walls.
 DENIAL_PHRASES = re.compile(
     r"\b(access denied|permission denied|insufficient (access )?privileges"
     r"|authentication required|not authorized|you do not have permission"
@@ -148,7 +148,7 @@ def extract_next_links(url, resp):
     record_page(page_url, words)
 
     # Access-denied and login pages have no content and no useful links
-    if is_access_wall(soup, words):
+    if is_access_wall(soup):
         return []
 
     # Same text and same links as a page we already saw: nothing new to expand
@@ -165,21 +165,26 @@ def extract_next_links(url, resp):
 
     return list(links)
 
-def is_access_wall(soup, words):
-    """Detects short "access denied" and login pages.
+def is_access_wall(soup):
+    """Detects "access denied" and login pages.
 
-    A page is an access wall when it has fewer than ACCESS_WALL_MAX_WORDS
-    words and either says access is denied or contains a password field
-    outside its header, navigation, footer or sidebar.
+    Only the page's own text counts (CHROME_TAGS are ignored, so a "Please
+    log in" link in a site header doesn't matter). A page is an access wall
+    when that text is low information (fewer than LOW_INFO_WORDS words) and
+    either says access is denied or comes with a password field.
     """
-    if len(words) >= ACCESS_WALL_MAX_WORDS:
+    content_text = " ".join(
+        text for text in soup.strings
+        if not any(parent.name in CHROME_TAGS for parent in text.parents)
+    ).lower()
+    if len(re.findall(r"\b[a-z]+(?:'[a-z]+)?\b", content_text)) >= LOW_INFO_WORDS:
         return False
-    if DENIAL_PHRASES.search(" ".join(words)):
+    if DENIAL_PHRASES.search(" ".join(content_text.split())):
         return True
 
-    # A login box in the site header doesn't make the page itself a login page
+    # A login form in the page body (not a login box in the site chrome)
     for field in soup.find_all("input", type=re.compile(r"^password$", re.I)):
-        if not any(parent.name in {"header", "nav", "footer", "aside"} for parent in field.parents):
+        if not any(parent.name in CHROME_TAGS for parent in field.parents):
             return True
     return False
 

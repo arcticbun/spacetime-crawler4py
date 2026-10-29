@@ -49,12 +49,13 @@ class Worker(Thread):
 
         Downloads a seed URL other than the one that failed; if that also gets
         no response, the cache server is down and the failure is not the URL's
-        fault.
+        fault. Callers must already have waited the politeness delay since
+        their last request, because the probe may hit the same host.
         """
         seeds = [seed.strip() for seed in self.config.seed_urls]
         probe_url = next((seed for seed in seeds if seed != failed_url), seeds[0])
         resp = download(probe_url, self.config, self.logger)
-        time.sleep(self.config.time_delay)
+        time.sleep(self.delay_for((urlparse(probe_url).hostname or "").lower()))
         return resp.status != 0
 
     def process_domain_discovery(self, hostname):
@@ -168,6 +169,10 @@ class Worker(Thread):
 
             # Handle network connection drop (status == 0)
             if resp.status == 0:
+                # The failed request may still have reached the host, so wait
+                # the politeness delay before probing the cache
+                time.sleep(delay)
+
                 # The cache is down: keep the URL and wait, without counting
                 # the failure against it
                 if not self.cache_is_reachable(tbd_url):

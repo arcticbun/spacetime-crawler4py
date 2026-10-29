@@ -27,9 +27,8 @@ def build_report(db_path="crawl_stats.sqlite3", stopwords_path="stopwords.txt"):
             if longest is None or word_count > longest[1]:
                 longest = (url, word_count)
 
-            # Exclude stop words and single letters (e.g. "s" from "it's" split
-            # by markup) only from the frequency report.
-            frequencies.update({word: count for word, count in json.loads(word_counts).items() if word not in stopwords and len(word) > 1})
+            # Exclude stop words only from the frequency report.
+            frequencies.update({word: count for word, count in json.loads(word_counts).items() if word not in stopwords})
             if hostname.endswith(".ics.uci.edu"):
                 subdomains[hostname] += 1
 
