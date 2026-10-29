@@ -119,7 +119,7 @@ def extract_next_links(url, resp):
     if content_type and not any(kind in content_type for kind in ("text/html", "application/xhtml+xml")):
         return []
 
-    soup = BeautifulSoup(raw.content, "html.parser")
+    soup = BeautifulSoup(decode_html(raw.content), "html.parser")
 
     # Extract links before extract_words strips script/style elements
     links = set()
@@ -201,6 +201,22 @@ def is_valid(url):
 
     except (TypeError, ValueError):
         return False
+
+def decode_html(content):
+    """Decodes UTF-16 pages that have no byte-order mark.
+
+    Without a BOM, BeautifulSoup reads UTF-16 as UTF-8: every ASCII
+    character is followed by a NUL byte, so no tag is recognized and each
+    letter becomes its own "word" (e.g. https://ics.uci.edu/~cs224/). Mostly
+    ASCII UTF-16 text is about half NUL bytes, which is how it is detected.
+    Other pages are returned as bytes for BeautifulSoup to detect.
+    """
+    sample = content[:2048]
+    if sample.startswith((b"\xff\xfe", b"\xfe\xff")) or sample.count(0) < len(sample) // 4:
+        return content
+    # Little-endian puts the NUL after each ASCII byte (odd offsets)
+    encoding = "utf-16-le" if sample[1::2].count(0) > sample[0::2].count(0) else "utf-16-be"
+    return content.decode(encoding, errors="replace")
 
 def extract_words(soup):
     """Returns the lowercase words of a page's visible text (markup excluded)."""
