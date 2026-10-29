@@ -185,7 +185,10 @@ def is_valid(url):
         ):
             return False
 
-        # Non-HTML file extensions
+        # Non-HTML file extensions. Source code, plain text and calendar files
+        # are served as text/plain or text/calendar, which the scraper does
+        # not index, so fetching them only wastes requests (first deployment
+        # crawl: ~2,250 requests, 1,620 of them flamingo's C++ source tree).
         clean_path = path.rstrip('/')
         return not re.search(
             r"\.(css|js|bmp|gif|jpe?g|ico|svg|webp"
@@ -197,7 +200,9 @@ def is_valid(url):
             + r"|epub|dll|cnf|tgz|sha1"
             + r"|thmx|mso|arff|rtf|jar|csv|lif|ipynb|ff|bib"
             + r"|mat|pkl|npy|npz|h5|sql|json"
-            + r"|rm|smil|wmv|swf|wma|zip|rar|gz)$", clean_path)
+            + r"|rm|smil|wmv|swf|wma|zip|rar|gz|xz|z|hqx|ova"
+            + r"|c|cc|cpp|cxx|h|hh|hpp|py|java|scm|ss|rkt|hs|m|sh|pl|rb|go|cs|scala|r"
+            + r"|txt|tsv|ics|nb|ma|cls|fig|wmf|wvx|emx)$", clean_path)
 
     except (TypeError, ValueError):
         return False
@@ -300,8 +305,9 @@ def is_url_trap(parsed):
     if re.search(r"(^|[?&;])(do=(media|diff|revisions|edit|index|recent|backlink|export|admin|login|register)|tab_details=|tab_files=|image=|action=(edit|history|info|diff)|diff=|oldid=|rev=|version=|idx=)", query_lower):
         return True
 
-    # 7. WordPress traps
-    if re.search(r"(^|[?&;])(replytocom|attachment_id)=", query_lower) or "format=xml" in query_lower or "format=json" in query_lower:
+    # 7. WordPress traps, and ?format= exports (xml/json feeds, Trac's
+    #    ?format=txt/csv copies of wiki pages)
+    if re.search(r"(^|[?&;])(replytocom|attachment_id|format)=", query_lower):
         return True
 
     # 8. Dynamic sorting, filtering, themes, pagination, limits, & subpage traps
