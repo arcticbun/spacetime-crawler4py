@@ -57,7 +57,11 @@ class Worker(Thread):
         # seeds disallowed by robots.txt are skipped
         seeds = [scraper.prepare_url(seed.strip()) or seed.strip() for seed in self.config.seed_urls]
         candidates = [seed for seed in seeds if seed != failed_url and scraper.is_allowed_by_robots(seed)]
-        probe_url = candidates[0] if candidates else seeds[0]
+        if not candidates:
+            # Nothing safe to probe: treat the failure as the URL's own, so the
+            # normal retry limit applies instead of waiting on a possible outage
+            return True
+        probe_url = candidates[0]
         resp = download(probe_url, self.config, self.logger)
         time.sleep(self.delay_for((urlparse(probe_url).hostname or "").lower()))
         return resp.status != 0
