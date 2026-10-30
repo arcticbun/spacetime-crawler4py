@@ -284,3 +284,13 @@ THINGS TO KEEP IN MIND
    both. Mechanisms can be used to avoid that, however the politeness limits
    still apply and will be checked.
 6. Do not attempt to download the links directly from ics servers.
+
+AI TOOL DISCLOSURE
+-------------------------
+
+Parts of this project were written with help from AI coding assistants:
+Claude Code (Anthropic) and Codex (OpenAI). We used them to review our code,
+suggest and write fixes (trap filters, duplicate detection, error handling,
+text decoding), write test cases, and analyze our crawl logs and database.
+Every change was reviewed and tested by the group members before it was
+committed, and no code was taken from other students.
