@@ -52,8 +52,12 @@ class Worker(Thread):
         fault. Callers must already have waited the politeness delay since
         their last request, because the probe may hit the same host.
         """
-        seeds = [seed.strip() for seed in self.config.seed_urls]
-        probe_url = next((seed for seed in seeds if seed != failed_url), seeds[0])
+        # Seeds are cleaned like any queued URL (config.ini omits the trailing
+        # slash), so the failed URL is recognized and never probed again, and
+        # seeds disallowed by robots.txt are skipped
+        seeds = [scraper.prepare_url(seed.strip()) or seed.strip() for seed in self.config.seed_urls]
+        candidates = [seed for seed in seeds if seed != failed_url and scraper.is_allowed_by_robots(seed)]
+        probe_url = candidates[0] if candidates else seeds[0]
         resp = download(probe_url, self.config, self.logger)
         time.sleep(self.delay_for((urlparse(probe_url).hostname or "").lower()))
         return resp.status != 0
